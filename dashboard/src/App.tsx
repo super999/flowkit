@@ -1,14 +1,16 @@
 import { BrowserRouter, NavLink, Routes, Route, useLocation } from 'react-router-dom'
-import { LayoutDashboard, FolderOpen, ScrollText, Film } from 'lucide-react'
+import { LayoutDashboard, FolderOpen, ScrollText, Film, Image } from 'lucide-react'
 import { useWebSocket } from './api/useWebSocket'
 import DashboardPage from './pages/DashboardPage'
 import ProjectsPage from './pages/ProjectsPage'
 import LogsPage from './pages/LogsPage'
 import GalleryPage from './pages/GalleryPage'
+import Txt2ImgPage from './pages/Txt2ImgPage'
 
 const NAV = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard', exact: true },
   { to: '/projects', icon: FolderOpen, label: 'Projects', exact: false },
+  { to: '/txt2img', icon: Image, label: 'Txt2Img', exact: false },
   { to: '/logs', icon: ScrollText, label: 'Logs', exact: false },
   { to: '/gallery', icon: Film, label: 'Gallery', exact: false },
 ]
@@ -78,6 +80,7 @@ function Layout() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/projects/:id" element={<ProjectsPage />} />
+            <Route path="/txt2img" element={<Txt2ImgPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/gallery" element={<GalleryPage />} />
           </Routes>
