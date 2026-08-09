@@ -6,10 +6,13 @@ import signal
 from contextlib import asynccontextmanager
 
 import websockets
+from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, OUTPUT_DIR
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -175,6 +178,31 @@ async def health():
         "extension_connected": client.connected,
         "ws": client.ws_stats,
     }
+
+
+# ─── Static Files & Dashboard UI ──────────────────────────────
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
+
+STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+REACT_DIST_DIR = Path(__file__).parent.parent / "dashboard" / "dist"
+if (REACT_DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(REACT_DIST_DIR / "assets")), name="react_assets")
+
+
+@app.get("/")
+@app.get("/dashboard")
+async def serve_dashboard():
+    """Serve the Web Dashboard SPA (React dist or fallback to static)."""
+    if (REACT_DIST_DIR / "index.html").exists():
+        return FileResponse(str(REACT_DIST_DIR / "index.html"))
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+    return {"status": "ok", "message": "Dashboard index.html not found"}
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────

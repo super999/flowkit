@@ -1,0 +1,1063 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlowKit — Web Dashboard & Control Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #0b0f17;
+      --bg-surface: #131b2e;
+      --bg-card: #1b2640;
+      --bg-card-hover: #233152;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-accent: rgba(139, 92, 246, 0.3);
+      
+      --primary: #8b5cf6;
+      --primary-hover: #7c3aed;
+      --primary-light: rgba(139, 92, 246, 0.15);
+      
+      --cyan: #06b6d4;
+      --cyan-light: rgba(6, 182, 212, 0.15);
+      
+      --success: #10b981;
+      --success-light: rgba(16, 185, 129, 0.15);
+      
+      --warning: #f59e0b;
+      --warning-light: rgba(245, 158, 11, 0.15);
+      
+      --danger: #ef4444;
+      --danger-light: rgba(239, 68, 68, 0.15);
+      
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 16px;
+      --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+      --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      line-height: 1.5;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg-base); }
+    ::-webkit-scrollbar-thumb { background: #2a3859; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3b4d7a; }
+
+    /* Header */
+    header {
+      background: rgba(19, 27, 46, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      padding: 0.8rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-badge {
+      background: linear-gradient(135deg, var(--primary), var(--cyan));
+      color: #fff;
+      font-weight: 700;
+      font-size: 1.1rem;
+      padding: 0.3rem 0.6rem;
+      border-radius: var(--radius-sm);
+      letter-spacing: 0.5px;
+      box-shadow: 0 0 12px rgba(139, 92, 246, 0.4);
+    }
+
+    .brand-title {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .header-status {
+      display: flex;
+      align-items: center;
+      gap: 1.2rem;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      font-size: 0.82rem;
+      font-weight: 500;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--text-dim);
+      display: inline-block;
+    }
+
+    .pulse-dot.online {
+      background-color: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    .pulse-dot.offline {
+      background-color: var(--danger);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.5rem 1rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.875rem;
+      font-weight: 500;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), #6d28d9);
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #7c3aed, #5b21b6);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text-main);
+      border-color: var(--border-color);
+    }
+    .btn-secondary:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-accent);
+    }
+
+    .btn-sm { padding: 0.25rem 0.6rem; font-size: 0.78rem; }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      max-width: 1440px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    /* Tabs */
+    .tabs-nav {
+      display: flex;
+      gap: 0.5rem;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 0.5rem;
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 0.6rem 1.2rem;
+      font-size: 0.9rem;
+      font-weight: 500;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .tab-btn.active {
+      color: var(--text-main);
+      background: var(--primary-light);
+      border: 1px solid var(--border-accent);
+    }
+
+    /* Tab Contents */
+    .tab-content { display: none; }
+    .tab-content.active { display: flex; flex-direction: column; gap: 1.5rem; }
+
+    /* Cards Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 1.2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .stat-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-value {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .progress-bar-bg {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 0.4rem;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--cyan), var(--primary));
+      border-radius: 3px;
+      transition: width 0.4s ease;
+    }
+
+    /* Section Card */
+    .section-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .section-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    /* Scene Grid */
+    .scene-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1.2rem;
+    }
+
+    .scene-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .scene-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--border-accent);
+    }
+
+    .scene-media-wrapper {
+      width: 100%;
+      aspect-ratio: 16/9;
+      background: #090d14;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .scene-media-wrapper video, .scene-media-wrapper img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .no-media-placeholder {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .scene-body {
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      flex: 1;
+    }
+
+    .scene-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .scene-num {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--cyan);
+    }
+
+    .scene-prompt {
+      font-size: 0.875rem;
+      color: var(--text-main);
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      line-height: 1.4;
+    }
+
+    .status-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .badge-completed { background: var(--success-light); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-pending { background: var(--warning-light); color: var(--warning); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-failed { background: var(--danger-light); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.3); }
+
+    /* Tables */
+    .data-table-container {
+      overflow-x: auto;
+    }
+
+    table.data-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.875rem;
+    }
+
+    table.data-table th, table.data-table td {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    table.data-table th {
+      background: var(--bg-card);
+      color: var(--text-muted);
+      font-weight: 500;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+    }
+
+    table.data-table tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .mono { font-family: var(--font-mono); font-size: 0.82rem; }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.open { display: flex; }
+
+    .modal {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-accent);
+      border-radius: var(--radius-lg);
+      width: 90%;
+      max-width: 600px;
+      padding: 1.8rem;
+      box-shadow: var(--shadow-lg);
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .form-group label {
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
+    .form-input, .form-select, .form-textarea {
+      background: var(--bg-base);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 0.6rem 0.8rem;
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    /* Toast Notification */
+    .toast-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 300;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .toast {
+      background: var(--bg-card);
+      border: 1px solid var(--border-accent);
+      color: var(--text-main);
+      padding: 0.8rem 1.2rem;
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
+      font-size: 0.875rem;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="logo-badge">FK</div>
+      <div class="brand-title">FlowKit Console</div>
+    </div>
+    
+    <div class="header-status">
+      <div class="status-chip">
+        <span class="pulse-dot" id="extPulse"></span>
+        <span id="extStatusText">Extension: Disconnected</span>
+      </div>
+
+      <div class="status-chip">
+        <span class="pulse-dot online"></span>
+        <span>Worker: <strong id="workerSlots">5 Slots Free</strong></span>
+      </div>
+
+      <button class="btn btn-secondary btn-sm" onclick="refreshAllData()">刷新数据</button>
+      <button class="btn btn-primary btn-sm" onclick="openNewProjectModal()">+ 新建项目</button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main>
+
+    <!-- Navigation Tabs -->
+    <nav class="tabs-nav">
+      <button class="tab-btn active" onclick="switchTab('dashboard')">📊 当前项目看板</button>
+      <button class="tab-btn" onclick="switchTab('projects')">📁 所有项目列表</button>
+      <button class="tab-btn" onclick="switchTab('entities')">👥 角色与场景实体</button>
+      <button class="tab-btn" onclick="switchTab('requests')">⚡ 生成任务队列</button>
+    </nav>
+
+    <!-- TAB 1: Dashboard -->
+    <div id="tab-dashboard" class="tab-content active">
+      
+      <!-- Stats Overview Grid -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">激活项目</div>
+          <div class="stat-value" id="activeProjName" style="font-size: 1.2rem;">(未选择项目)</div>
+          <div style="font-size: 0.78rem; color: var(--text-dim);" id="activeProjId">-</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">分镜图片生成率</div>
+          <div class="stat-value" id="imgProgressText">0 / 0</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="imgProgressBar" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">视频片段生成率</div>
+          <div class="stat-value" id="vidProgressText">0 / 0</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="vidProgressBar" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">4K 超分完成度</div>
+          <div class="stat-value" id="upscaleProgressText">0 / 0</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="upscaleProgressBar" style="width: 0%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene List Grid -->
+      <div class="section-card">
+        <div class="section-header">
+          <div class="section-title">🎬 分镜与视频预览 (Scenes Gallery)</div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-secondary btn-sm" onclick="fetchActiveProjectScenes()">刷新分镜</button>
+          </div>
+        </div>
+
+        <div class="scene-grid" id="scenesContainer">
+          <div style="grid-column: 1 / -1; padding: 2rem; text-align: center; color: var(--text-muted);">
+            正在加载分镜数据...
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- TAB 2: Projects List -->
+    <div id="tab-projects" class="tab-content">
+      <div class="section-card">
+        <div class="section-header">
+          <div class="section-title">所有视频项目</div>
+          <button class="btn btn-primary btn-sm" onclick="openNewProjectModal()">+ 创建项目</button>
+        </div>
+
+        <div class="data-table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>项目 ID</th>
+                <th>项目名称</th>
+                <th>画风材质</th>
+                <th>激活状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="projectsTableBody">
+              <tr><td colspan="5" style="text-align: center;">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: Entities -->
+    <div id="tab-entities" class="tab-content">
+      <div class="section-card">
+        <div class="section-header">
+          <div class="section-title">项目实体定义 (Characters & Locations)</div>
+        </div>
+        <div class="data-table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>类型</th>
+                <th>描述特征</th>
+                <th>Media ID (UUID)</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="entitiesTableBody">
+              <tr><td colspan="5" style="text-align: center;">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: Requests Queue -->
+    <div id="tab-requests" class="tab-content">
+      <div class="section-card">
+        <div class="section-header">
+          <div class="section-title">实时生成请求队列 (Worker Requests Queue)</div>
+        </div>
+        <div class="data-table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Req ID</th>
+                <th>类型</th>
+                <th>Scene ID</th>
+                <th>状态</th>
+                <th>创建时间</th>
+              </tr>
+            </thead>
+            <tbody id="requestsTableBody">
+              <tr><td colspan="5" style="text-align: center;">暂无进行中的请求</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Modal: New Project -->
+  <div class="modal-overlay" id="newProjectModal">
+    <div class="modal">
+      <div style="font-size: 1.2rem; font-weight: 600;">新建 Google Flow 项目</div>
+
+      <div class="form-group">
+        <label>项目名称 (Project Name)</label>
+        <input type="text" class="form-input" id="newProjName" placeholder="例如: 星际探险家">
+      </div>
+
+      <div class="form-group">
+        <label>剧情梗概 (Story Summary)</label>
+        <textarea class="form-textarea" id="newProjStory" rows="3" placeholder="简要描述故事设定与情节发展..."></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>画风材质 (Material Style)</label>
+        <select class="form-select" id="newProjMaterial">
+          <option value="realistic">Realistic (真实写实)</option>
+          <option value="3d_pixar">3D Pixar (皮克斯动画)</option>
+          <option value="anime">Anime (日系动漫)</option>
+          <option value="stop_motion">Stop Motion (定格动画)</option>
+          <option value="minecraft">Minecraft (像素方块)</option>
+          <option value="oil_painting">Oil Painting (油画艺术)</option>
+        </select>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeNewProjectModal()">取消</button>
+        <button class="btn btn-primary" onclick="submitNewProject()">立即创建</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- JavaScript -->
+  <script>
+    let activeProjectId = null;
+    let activeVideoId = null;
+    let ws = null;
+
+    // Toast Notification
+    function showToast(msg) {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.innerText = msg;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 3500);
+    }
+
+    // Tab Switch
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      
+      if (event && event.target) event.target.classList.add('active');
+      document.getElementById(`tab-${tabId}`).classList.add('active');
+
+      if (tabId === 'projects') fetchAllProjects();
+      if (tabId === 'entities') fetchEntities();
+      if (tabId === 'requests') fetchPendingRequests();
+    }
+
+    // Modal Control
+    function openNewProjectModal() { document.getElementById('newProjectModal').classList.add('open'); }
+    function closeNewProjectModal() { document.getElementById('newProjectModal').classList.remove('open'); }
+
+    // Init WebSocket Connection for real-time dashboard events
+    function initWebSocket() {
+      const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${location.host}/ws/dashboard`;
+      
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("Connected to Dashboard WS");
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'snapshot') {
+            updateHealthStatus(data.health);
+            updateWorkerStatus(data.worker);
+            if (data.requests) renderRequests(data.requests);
+          } else if (data.type === 'extension_status') {
+            updateHealthStatus({ extension_connected: data.connected });
+          } else if (data.type === 'request_updated') {
+            fetchPendingRequests();
+            fetchActiveProjectScenes();
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      ws.onclose = () => {
+        setTimeout(initWebSocket, 3000);
+      };
+    }
+
+    // Update Health Pulse UI
+    function updateHealthStatus(health) {
+      const pulse = document.getElementById('extPulse');
+      const text = document.getElementById('extStatusText');
+      if (health && health.extension_connected) {
+        pulse.className = 'pulse-dot online';
+        text.innerText = 'Extension: 已连接';
+      } else {
+        pulse.className = 'pulse-dot offline';
+        text.innerText = 'Extension: 未连接';
+      }
+    }
+
+    function updateWorkerStatus(worker) {
+      if (!worker) return;
+      const slots = worker.slots !== undefined ? worker.slots : 5;
+      document.getElementById('workerSlots').innerText = `${slots} Slots Free`;
+    }
+
+    // API Calls
+    async function checkHealth() {
+      try {
+        const res = await fetch('/health');
+        const data = await res.json();
+        updateHealthStatus(data);
+      } catch(e) {
+        updateHealthStatus({ extension_connected: false });
+      }
+    }
+
+    async function fetchActiveProject() {
+      try {
+        const res = await fetch('/api/active-project');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.project_id) {
+          activeProjectId = data.project_id;
+          activeVideoId = data.video_id;
+          document.getElementById('activeProjName').innerText = data.project_name || activeProjectId;
+          document.getElementById('activeProjId').innerText = `ID: ${activeProjectId}`;
+          fetchActiveProjectScenes();
+        } else {
+          document.getElementById('activeProjName').innerText = "(暂无激活项目)";
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function fetchActiveProjectScenes() {
+      if (!activeProjectId) return;
+      
+      try {
+        let vid = activeVideoId;
+        if (!vid) {
+          const vRes = await fetch(`/api/videos?project_id=${activeProjectId}`);
+          const vData = await vRes.json();
+          if (vData.length > 0) vid = vData[0].id;
+        }
+
+        if (!vid) {
+          document.getElementById('scenesContainer').innerHTML = `
+            <div style="grid-column: 1 / -1; padding: 2rem; text-align: center; color: var(--text-muted);">
+              该项目尚未创建 Video / Scene 列表。
+            </div>`;
+          return;
+        }
+
+        const sRes = await fetch(`/api/scenes?video_id=${vid}`);
+        const scenes = await sRes.json();
+
+        renderScenes(scenes);
+      } catch (e) {
+        console.error("Error fetching scenes:", e);
+      }
+    }
+
+    function renderScenes(scenes) {
+      const container = document.getElementById('scenesContainer');
+      if (!scenes || scenes.length === 0) {
+        container.innerHTML = `<div style="grid-column: 1 / -1; padding: 2rem; text-align: center; color: var(--text-muted);">无分镜数据</div>`;
+        return;
+      }
+
+      let imgDone = 0, vidDone = 0, upscaleDone = 0;
+      const total = scenes.length;
+
+      container.innerHTML = scenes.map((s, idx) => {
+        const imgStatus = s.horizontal_image_status || s.vertical_image_status || 'PENDING';
+        const vidStatus = s.horizontal_video_status || s.vertical_video_status || 'PENDING';
+        const upscaleStatus = s.horizontal_upscale_status || s.vertical_upscale_status || 'PENDING';
+
+        if (imgStatus === 'COMPLETED') imgDone++;
+        if (vidStatus === 'COMPLETED') vidDone++;
+        if (upscaleStatus === 'COMPLETED') upscaleDone++;
+
+        let mediaHtml = `
+          <div class="no-media-placeholder">
+            <span>📷 尚未生成媒体</span>
+          </div>`;
+        
+        if (s.video_url || s.image_url) {
+          if (vidStatus === 'COMPLETED' && s.video_url) {
+            mediaHtml = `<video controls src="${s.video_url}" poster="${s.image_url || ''}"></video>`;
+          } else if (s.image_url) {
+            mediaHtml = `<img src="${s.image_url}" alt="Scene image">`;
+          }
+        }
+
+        return `
+          <div class="scene-card">
+            <div class="scene-media-wrapper">
+              ${mediaHtml}
+            </div>
+            <div class="scene-body">
+              <div class="scene-meta">
+                <span class="scene-num">Scene #${s.display_order || (idx + 1)}</span>
+                <div class="status-tags">
+                  <span class="badge badge-${imgStatus.toLowerCase()}">Img: ${imgStatus}</span>
+                  <span class="badge badge-${vidStatus.toLowerCase()}">Vid: ${vidStatus}</span>
+                </div>
+              </div>
+              <div class="scene-prompt">${escapeHtml(s.prompt || '(无提示词)')}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      document.getElementById('imgProgressText').innerText = `${imgDone} / ${total}`;
+      document.getElementById('imgProgressBar').style.width = `${Math.round((imgDone/total)*100)}%`;
+
+      document.getElementById('vidProgressText').innerText = `${vidDone} / ${total}`;
+      document.getElementById('vidProgressBar').style.width = `${Math.round((vidDone/total)*100)}%`;
+
+      document.getElementById('upscaleProgressText').innerText = `${upscaleDone} / ${total}`;
+      document.getElementById('upscaleProgressBar').style.width = `${Math.round((upscaleDone/total)*100)}%`;
+    }
+
+    async function fetchAllProjects() {
+      try {
+        const res = await fetch('/api/projects');
+        const projects = await res.json();
+        const tbody = document.getElementById('projectsTableBody');
+        
+        if (!projects || projects.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">暂无项目</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = projects.map(p => `
+          <tr>
+            <td class="mono">${p.id}</td>
+            <td><strong>${escapeHtml(p.name || '未命名')}</strong></td>
+            <td><span class="badge" style="background: rgba(139, 92, 246, 0.2); color: #c4b5fd;">${p.material || 'default'}</span></td>
+            <td>${p.id === activeProjectId ? '<span class="badge badge-completed">ACTIVE</span>' : '-'}</td>
+            <td>
+              <button class="btn btn-secondary btn-sm" onclick="setActiveProject('${p.id}')">设为激活</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function setActiveProject(pid) {
+      try {
+        await fetch('/api/active-project', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: pid })
+        });
+        showToast("已成功切换激活项目");
+        fetchActiveProject();
+        switchTab('dashboard');
+      } catch (e) {
+        showToast("切换失败");
+      }
+    }
+
+    async function fetchEntities() {
+      if (!activeProjectId) {
+        document.getElementById('entitiesTableBody').innerHTML = `<tr><td colspan="5" style="text-align: center;">请先选择或激活一个项目</td></tr>`;
+        return;
+      }
+      try {
+        const res = await fetch(`/api/projects/${activeProjectId}/characters`);
+        const chars = await res.json();
+        const tbody = document.getElementById('entitiesTableBody');
+        
+        if (!chars || chars.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align: center;">该项目尚无实体定义</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = chars.map(c => `
+          <tr>
+            <td><strong>${escapeHtml(c.name)}</strong></td>
+            <td><span class="badge" style="background: rgba(6, 182, 212, 0.2); color: #67e8f9;">${c.type || 'character'}</span></td>
+            <td>${escapeHtml(c.description || '-')}</td>
+            <td class="mono">${c.media_id || '(未生成)'}</td>
+            <td>${c.media_id ? '<span class="badge badge-completed">READY</span>' : '<span class="badge badge-pending">PENDING</span>'}</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function fetchPendingRequests() {
+      try {
+        const res = await fetch('/api/requests/pending');
+        const reqs = await res.json();
+        renderRequests(reqs);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function renderRequests(reqs) {
+      const tbody = document.getElementById('requestsTableBody');
+      if (!reqs || reqs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">队列空闲 (无等待/处理中的任务)</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = reqs.map(r => `
+        <tr>
+          <td class="mono">${r.id.substring(0, 8)}...</td>
+          <td><span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #fde047;">${r.type}</span></td>
+          <td class="mono">${r.scene_id ? r.scene_id.substring(0, 8) : '-'}</td>
+          <td><span class="badge badge-${r.status.toLowerCase()}">${r.status}</span></td>
+          <td class="mono">${r.created_at || '-'}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function submitNewProject() {
+      const name = document.getElementById('newProjName').value.trim();
+      const story = document.getElementById('newProjStory').value.trim();
+      const material = document.getElementById('newProjMaterial').value;
+
+      if (!name) {
+        showToast("请输入项目名称");
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, story, material })
+        });
+        
+        if (res.ok) {
+          const newProj = await res.json();
+          showToast(`项目 "${name}" 创建成功!`);
+          closeNewProjectModal();
+          setActiveProject(newProj.id);
+        } else {
+          showToast("创建失败");
+        }
+      } catch (e) {
+        showToast("请求异常");
+      }
+    }
+
+    function refreshAllData() {
+      checkHealth();
+      fetchActiveProject();
+      showToast("数据已刷新");
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Startup
+    window.addEventListener('DOMContentLoaded', () => {
+      checkHealth();
+      fetchActiveProject();
+      initWebSocket();
+    });
+  </script>
+</body>
+</html>

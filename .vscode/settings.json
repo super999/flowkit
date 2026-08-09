@@ -1,0 +1,14 @@
+{
+    "python.defaultInterpreterPath": "D:\\python_envs\\flowkit\\python.exe",
+    "python.analysis.extraPaths": [
+        "D:\\python_envs\\flowkit\\Lib\\site-packages"
+    ],
+    "python.useEnvironmentsExtension": false,
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.indexing": true,
+    "python.terminal.activateEnvironment": true,
+    "json.schemaDownload.enable": true,
+    "json.schemaDownload.trustedDomains": {
+        "https://opencode.ai/": true
+    }
+}
