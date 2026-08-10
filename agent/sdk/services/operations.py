@@ -357,6 +357,7 @@ class OperationService:
         return await self._client.generate_images(
             prompt=prompt, project_id=pid, aspect_ratio=aspect,
             user_paygate_tier=tier, character_media_ids=char_media_ids,
+            image_model=scene.get("image_model") or None,
         )
 
     async def edit_scene_image(self, scene: dict, orientation: str,
@@ -728,6 +729,7 @@ class OperationService:
         result = await self._client.generate_images(
             prompt=prompt, project_id=pid, aspect_ratio=aspect,
             user_paygate_tier=tier,
+            image_model=char.get("image_model") or None,
         )
 
         if not _is_error(result):

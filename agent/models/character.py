@@ -7,12 +7,15 @@ from agent.models.enums import EntityType
 
 class CharacterCreate(BaseModel):
     name: str
+    project_id: Optional[str] = None
     entity_type: EntityType = "character"
     description: Optional[str] = None
     image_prompt: Optional[str] = None
     voice_description: Optional[str] = None  # max ~30 words
     reference_image_url: Optional[str] = None
     media_id: Optional[str] = None
+    material: Optional[str] = None  # None/""/none=no style baked, else material ID
+    image_model: Optional[str] = None  # None=default (Banana Pro), else GEM_PIX_2 / NARWHAL / HARBOR_SEAL
 
 
 class CharacterUpdate(BaseModel):
@@ -23,6 +26,7 @@ class CharacterUpdate(BaseModel):
     voice_description: Optional[str] = None
     reference_image_url: Optional[str] = None
     media_id: Optional[str] = None
+    image_model: Optional[str] = None
 
 
 class Character(BaseModel):
@@ -35,5 +39,6 @@ class Character(BaseModel):
     voice_description: Optional[str] = None
     reference_image_url: Optional[str] = None
     media_id: Optional[str] = None
+    image_model: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

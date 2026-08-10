@@ -15,7 +15,11 @@
       "type": "python",
       "request": "launch",
       "module": "agent.main",
+      "python": "D:\\python_envs\\flowkit\\python.exe",
       "cwd": "${workspaceFolder}",
+      "env": {
+        "GLA_RELOAD": "1"
+      },
       "console": "integratedTerminal"
     }
   ]

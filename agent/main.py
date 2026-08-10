@@ -27,6 +27,10 @@ from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
+from agent.api.settings import router as settings_router
+from agent.api.llm import router as llm_router
+from agent.api.refgen import router as refgen_router
+from agent.api.ref_images import router as ref_images_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -138,6 +142,10 @@ app.include_router(music_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
+app.include_router(settings_router, prefix="/api")
+app.include_router(llm_router, prefix="/api")
+app.include_router(refgen_router, prefix="/api")
+app.include_router(ref_images_router, prefix="/api")
 
 
 import secrets as _secrets
@@ -260,11 +268,11 @@ async def dashboard_ws(websocket: WebSocket):
 if __name__ == "__main__":
     import os
     import uvicorn
-    reload_enabled = os.environ.get("GLA_RELOAD", "0") == "1"
+    reload_enabled = os.environ.get("GLA_RELOAD", "1") == "1"
     uvicorn.run(
         "agent.main:app",
         host=API_HOST,
         port=API_PORT,
         reload=reload_enabled,
-        reload_excludes=["*.db", "*.db-wal", "*.db-shm", "output/*"],
+        reload_excludes=["*.db", "*.db-wal", "*.db-shm", "output/*", "dashboard/*", ".omc/*"],
     )

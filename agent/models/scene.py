@@ -14,6 +14,8 @@ class SceneCreate(BaseModel):
     parent_scene_id: Optional[str] = None
     chain_type: ChainType = "ROOT"
     source: Optional[SceneSource] = None
+    material: Optional[str] = None  # None/""=project material, "none"=user writes style, else material ID
+    image_model: Optional[str] = None  # None/""=default (Banana Pro), else model key: GEM_PIX_2 / NARWHAL / HARBOR_SEAL
 
 
 class SceneUpdate(BaseModel):
@@ -25,6 +27,7 @@ class SceneUpdate(BaseModel):
     chain_type: Optional[ChainType] = None
     source: Optional[SceneSource] = None
     display_order: Optional[int] = None
+    image_model: Optional[str] = None
 
     vertical_image_url: Optional[str] = None
     vertical_image_media_id: Optional[str] = None
@@ -68,6 +71,7 @@ class Scene(BaseModel):
     parent_scene_id: Optional[str] = None
     chain_type: str = "ROOT"
     source: Optional[str] = "root"
+    image_model: Optional[str] = None
 
     vertical_image_url: Optional[str] = None
     vertical_image_media_id: Optional[str] = None

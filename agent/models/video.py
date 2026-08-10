@@ -5,7 +5,7 @@ from agent.models.enums import VideoStatus
 
 class VideoCreate(BaseModel):
     project_id: str
-    title: str
+    title: str = "Untitled"
     description: Optional[str] = None
     display_order: int = 0
     orientation: Optional[str] = None

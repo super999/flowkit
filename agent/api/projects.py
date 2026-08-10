@@ -133,40 +133,32 @@ def _get_repo() -> SQLiteRepository:
 async def create(body: ProjectCreate):
     from agent.materials import get_material
 
-    # Step 1: Create project on Google Flow to get the real projectId
+    # Step 1: Create or link existing project on Google Flow to get real projectId
+    flow_project_id = None
+    if body.flow_project_id:
+        match = re.search(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", body.flow_project_id, re.I)
+        flow_project_id = match.group(0) if match else body.flow_project_id.strip()
+
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected — cannot create project on Google Flow")
+    detected_tier = await _detect_user_tier(client) if client.connected else "PAYGATE_TIER_ONE"
 
-    # Resolve material (support legacy style field + material field)
-    material_id = _resolve_material_id(body.material)
-    material = get_material(material_id)
-    if not material:
-        raise HTTPException(400, f"Unknown material: '{material_id}'. Use GET /api/materials to list available materials.")
+    if not flow_project_id:
+        if not client.connected:
+            raise HTTPException(503, "Extension not connected — cannot create project on Google Flow")
 
-    # Validate characters before any API calls to avoid orphan projects
-    characters_input_raw = body.model_dump(exclude_none=True).get("characters")
-    if characters_input_raw:
-        slugs = [slugify(c["name"]) for c in characters_input_raw]
-        if len(slugs) != len(set(slugs)):
-            dupes = [s for s in slugs if slugs.count(s) > 1]
-            raise HTTPException(400, f"Duplicate character slugs: {list(set(dupes))}")
+        flow_result = await client.create_project(body.name, body.tool_name)
+        if flow_result.get("error"):
+            raise HTTPException(502, f"Flow API error: {flow_result['error']}")
 
-    detected_tier = await _detect_user_tier(client)
+        try:
+            data = flow_result.get("data", {})
+            result = data["result"]["data"]["json"]["result"]
+            flow_project_id = result["projectId"]
+        except (KeyError, TypeError) as e:
+            logger.error("Unexpected Flow response: %s", flow_result)
+            raise HTTPException(502, f"Failed to parse Flow response: {e}")
 
-    flow_result = await client.create_project(body.name, body.tool_name)
-    if flow_result.get("error"):
-        raise HTTPException(502, f"Flow API error: {flow_result['error']}")
-
-    try:
-        data = flow_result.get("data", {})
-        result = data["result"]["data"]["json"]["result"]
-        flow_project_id = result["projectId"]
-    except (KeyError, TypeError) as e:
-        logger.error("Unexpected Flow response: %s", flow_result)
-        raise HTTPException(502, f"Failed to parse Flow response: {e}")
-
-    logger.info("Flow project created: %s", flow_project_id)
+    logger.info("Flow project resolved/linked: %s", flow_project_id)
 
     repo = _get_repo()
 
@@ -270,6 +262,60 @@ async def get_characters(pid: str):
     return await repo.get_project_characters(pid)
 
 
+@router.get("/{pid}/media")
+async def get_project_media(pid: str):
+    """List all media captured for a Flow project (generated + uploaded).
+
+    Data comes from the passive TRPC capture: opening the project page in
+    Chrome feeds every media entry into flow_media. Entries are attributed to
+    the project when their media_id appears in the project's scenes/characters/
+    refgen results or uploaded reference library.
+    """
+    from agent.db import crud as db_crud
+
+    rows = await db_crud.list_flow_media()
+
+    # Collect media_ids belonging to this project
+    mine: set[str] = set()
+    repo = _get_repo()
+    try:
+        for v in await repo.list_videos(pid):
+            for s in await repo.list_scenes(v.id):
+                for k in ("vertical_image_media_id", "horizontal_image_media_id",
+                          "vertical_video_media_id", "horizontal_video_media_id",
+                          "vertical_upscale_media_id", "horizontal_upscale_media_id"):
+                    if s.get(k):
+                        mine.add(s[k])
+    except Exception:
+        pass
+    try:
+        for c in await repo.get_project_characters(pid):
+            if c.media_id:
+                mine.add(c.media_id)
+    except Exception:
+        pass
+    try:
+        for r in await db_crud.list_refgen_results(pid):
+            if r.get("media_id"):
+                mine.add(r["media_id"])
+    except Exception:
+        pass
+    try:
+        for r in await db_crud.list_ref_images():
+            if r.get("media_id"):
+                mine.add(r["media_id"])
+    except Exception:
+        pass
+
+    return [{
+        "media_id": row["media_id"],
+        "media_type": row["media_type"],
+        "url": row["url"],
+        "in_project": row["media_id"] in mine,
+        "updated_at": row["updated_at"],
+    } for row in rows]
+
+
 @router.get("/{pid}/output-dir")
 async def get_output_dir(pid: str):
     """Get or create project output directory with meta.json."""
@@ -327,6 +373,7 @@ class ThumbnailRequest(BaseModel):
     character_names: list[str] = []
     aspect_ratio: str = "LANDSCAPE"
     output_filename: str = "thumbnail.png"
+    material: str | None = None  # None/""=project material, "none"=no style prefix, else material ID
 
 
 class ThumbnailResponse(BaseModel):
@@ -358,9 +405,11 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
         raise HTTPException(404, "Project not found")
 
     # Build full prompt: prepend material scene_prefix for style consistency
-    material_id = getattr(project, "material", None) or "realistic"
-    material = get_material(material_id)
-    scene_prefix = material["scene_prefix"] if material and material.get("scene_prefix") else ""
+    material_id = body.material or getattr(project, "material", None) or "realistic"
+    scene_prefix = ""
+    if material_id != "none":
+        material = get_material(material_id)
+        scene_prefix = material["scene_prefix"] if material and material.get("scene_prefix") else ""
     full_prompt = f"{scene_prefix} {body.prompt}".strip() if scene_prefix else body.prompt
 
     # Resolve character reference media_ids (error if any named entity is missing media_id)

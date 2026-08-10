@@ -8,7 +8,7 @@ from agent.db.schema import get_db, _db_lock
 
 logger = logging.getLogger(__name__)
 
-_VALID_TABLES = frozenset({"character", "project", "video", "scene", "request", "material"})
+_VALID_TABLES = frozenset({"character", "project", "video", "scene", "request", "material", "refgen_result", "ref_image", "flow_media"})
 
 
 def _validate_table(table: str) -> None:
@@ -87,15 +87,15 @@ async def _delete(table: str, pk: str, pk_val: str) -> bool:
 
 # ─── Character ──────────────────────────────────────────────
 
-async def create_character(name: str, entity_type: str = "character", description: str = None, image_prompt: str = None, voice_description: str = None, reference_image_url: str = None, media_id: str = None, slug: str = None) -> dict:
+async def create_character(name: str, entity_type: str = "character", description: str = None, image_prompt: str = None, voice_description: str = None, reference_image_url: str = None, media_id: str = None, slug: str = None, image_model: str = None) -> dict:
     from agent.utils.slugify import slugify
     db = await get_db()
     cid, now = _uuid(), _now()
     _slug = slug or slugify(name)
     async with _db_lock:
         await db.execute(
-            "INSERT INTO character (id,name,slug,entity_type,description,image_prompt,voice_description,reference_image_url,media_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, name, _slug, entity_type, description, image_prompt, voice_description, reference_image_url, media_id, now, now))
+            "INSERT INTO character (id,name,slug,entity_type,description,image_prompt,voice_description,reference_image_url,media_id,image_model,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cid, name, _slug, entity_type, description, image_prompt, voice_description, reference_image_url, media_id, image_model, now, now))
         await db.commit()
     return await _get_with_db(db, "character", "id", cid)
 
@@ -188,16 +188,16 @@ async def create_scene(video_id: str, display_order: int, prompt: str,
                        transition_prompt: str = None,
                        character_names: list[str] = None,
                        parent_scene_id: str = None, chain_type: str = "ROOT",
-                       source: str = "root") -> dict:
+                       source: str = "root", image_model: str = None) -> dict:
     db = await get_db()
     sid, now = _uuid(), _now()
     chars_json = json.dumps(character_names) if character_names else None
     async with _db_lock:
         await db.execute(
             """INSERT INTO scene (id,video_id,display_order,prompt,image_prompt,video_prompt,transition_prompt,character_names,
-               parent_scene_id,chain_type,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               parent_scene_id,chain_type,source,image_model,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (sid, video_id, display_order, prompt, image_prompt, video_prompt, transition_prompt, chars_json,
-             parent_scene_id, chain_type, source, now, now))
+             parent_scene_id, chain_type, source, image_model, now, now))
         await db.commit()
     return await _get_with_db(db, "scene", "id", sid)
 
@@ -317,6 +317,75 @@ async def reset_stale_processing(cutoff_minutes: int = 10) -> int:
 
 
 # ─── Material ────────────────────────────────────────────────
+
+async def create_refgen_result(project_id: str, media_id: str, url: str, prompt: str,
+                               aspect: str = None, model: str = None,
+                               duration_ms: int = None, id: str = None) -> dict:
+    db = await get_db()
+    rid, now = id or _uuid(), _now()
+    async with _db_lock:
+        await db.execute(
+            "INSERT INTO refgen_result (id,project_id,media_id,url,prompt,aspect,model,duration_ms,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (rid, project_id, media_id, url, prompt, aspect, model, duration_ms, now))
+        await db.commit()
+    return await _get_with_db(db, "refgen_result", "id", rid)
+
+
+async def list_refgen_results(project_id: str) -> list[dict]:
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT * FROM refgen_result WHERE project_id=? ORDER BY created_at DESC", (project_id,))
+    return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_refgen_result(rid: str) -> bool:
+    return await _delete("refgen_result", "id", rid)
+
+
+# ─── Ref Image Library ───────────────────────────────────────
+
+async def create_ref_image(media_id: str, name: str = "", thumb: str = "",
+                           project_id: str = "", id: str = None) -> dict:
+    db = await get_db()
+    rid, now = id or _uuid(), _now()
+    async with _db_lock:
+        await db.execute(
+            "INSERT INTO ref_image (id,project_id,media_id,name,thumb,created_at) VALUES (?,?,?,?,?,?)",
+            (rid, project_id, media_id, name, thumb, now))
+        await db.commit()
+    return await _get_with_db(db, "ref_image", "id", rid)
+
+
+async def list_ref_images() -> list[dict]:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM ref_image ORDER BY created_at DESC")
+    return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_ref_image(rid: str) -> bool:
+    return await _delete("ref_image", "id", rid)
+
+
+# ─── Flow Media (passively captured project media) ──────────
+
+async def upsert_flow_media(media_id: str, media_type: str, url: str) -> dict | None:
+    db = await get_db()
+    now = _now()
+    async with _db_lock:
+        await db.execute(
+            """INSERT INTO flow_media (media_id,media_type,url,created_at,updated_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(media_id) DO UPDATE SET url=excluded.url, media_type=excluded.media_type, updated_at=excluded.updated_at""",
+            (media_id, media_type, url, now, now))
+        await db.commit()
+    return await _get_with_db(db, "flow_media", "media_id", media_id)
+
+
+async def list_flow_media(limit: int = 500) -> list[dict]:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM flow_media ORDER BY updated_at DESC LIMIT ?", (limit,))
+    return [dict(r) for r in await cur.fetchall()]
+
 
 async def create_material(id: str, name: str, style_instruction: str,
                           negative_prompt: str = None, scene_prefix: str = None,

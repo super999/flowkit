@@ -27,21 +27,29 @@ def _scene_to_flat(sdk_scene) -> dict:
 
 @router.post("", response_model=Scene)
 async def create(body: SceneCreate):
-    # Auto-prepend material scene_prefix if project has a material set
+    # Auto-prepend material scene_prefix if project has a material set.
+    # body.material overrides the project material:
+    #   None/""  -> use project material (default)
+    #   "none"   -> no style prefix (user writes style in prompt)
+    #   <id>     -> use that material's scene_prefix
     if body.video_id and body.prompt:
         video = await _repo.get_video(body.video_id)
         if video:
             from agent.db.crud import get_project
             project_row = await get_project(video.project_id)
-            if project_row and project_row.get("material"):
+            material_id = body.material
+            if not material_id:
+                material_id = project_row.get("material") if project_row else None
+            if material_id and material_id != "none":
                 from agent.materials import get_material
-                mat = get_material(project_row["material"])
+                mat = get_material(material_id)
                 if mat and mat.get("scene_prefix"):
                     prefix = mat["scene_prefix"]
                     if not body.prompt.startswith(prefix):
                         body.prompt = f"{prefix} {body.prompt}"
 
     data = body.model_dump(exclude_none=True)
+    data.pop("material", None)
 
     # Auto-shift subsequent scenes when inserting
     if data.get("chain_type") == "INSERT" and data.get("video_id"):

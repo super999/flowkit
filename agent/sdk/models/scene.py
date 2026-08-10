@@ -48,6 +48,7 @@ class Scene(DomainModel):
     parent_scene_id: Optional[str] = None
     chain_type: str = "ROOT"
     source: Optional[str] = "root"
+    image_model: Optional[str] = None
 
     vertical: OrientationSlot = field(default_factory=OrientationSlot)
     horizontal: OrientationSlot = field(default_factory=OrientationSlot)
@@ -88,6 +89,7 @@ class Scene(DomainModel):
             parent_scene_id=row.get("parent_scene_id"),
             chain_type=row.get("chain_type", "ROOT"),
             source=row.get("source", "root"),
+            image_model=row.get("image_model"),
             vertical=_slot_from_row(row, "vertical"),
             horizontal=_slot_from_row(row, "horizontal"),
             trim_start=row.get("trim_start"),
@@ -113,6 +115,7 @@ class Scene(DomainModel):
             "parent_scene_id": self.parent_scene_id,
             "chain_type": self.chain_type,
             "source": self.source,
+            "image_model": self.image_model,
             "_project_id": project_id,
         }
         # Flatten OrientationSlot fields

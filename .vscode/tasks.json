@@ -18,9 +18,12 @@
     {
       "label": "Start FlowKit Backend Server",
       "type": "shell",
-      "command": "python -m agent.main",
+      "command": "D:\\python_envs\\flowkit\\python.exe -m agent.main",
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "GLA_RELOAD": "1"
+        }
       },
       "problemMatcher": [],
       "presentation": {

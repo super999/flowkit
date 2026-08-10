@@ -158,6 +158,40 @@ CREATE INDEX IF NOT EXISTS idx_scene_order ON scene(video_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_request_status ON request(status);
 CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
 CREATE INDEX IF NOT EXISTS idx_video_project ON video(project_id);
+
+CREATE TABLE IF NOT EXISTS refgen_result (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES project(id) ON DELETE CASCADE,
+    media_id   TEXT,
+    url        TEXT,
+    prompt     TEXT,
+    aspect     TEXT,
+    model      TEXT,
+    duration_ms INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_refgen_project ON refgen_result(project_id);
+
+CREATE TABLE IF NOT EXISTS ref_image (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT,
+    media_id   TEXT,
+    name       TEXT,
+    thumb      TEXT,  -- small base64 thumbnail for the library grid
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ref_image_media ON ref_image(media_id);
+
+-- All media seen in Flow projects (captured passively from TRPC when the
+-- project page is opened in Chrome). This powers the "project media" view.
+CREATE TABLE IF NOT EXISTS flow_media (
+    media_id   TEXT PRIMARY KEY,
+    media_type TEXT,  -- image | video
+    url        TEXT,
+    source     TEXT DEFAULT 'trpc',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
 """
 
 
@@ -206,6 +240,24 @@ async def init_db():
         if "retry_count" not in request_columns:
             await db.execute("ALTER TABLE request ADD COLUMN retry_count INTEGER DEFAULT 0")
             logger.info("Migrated: added retry_count column to request table")
+        # Migration: add image_model to scene table (per-scene image model override)
+        cursor = await db.execute("PRAGMA table_info(scene)")
+        scene_columns = {row[1] for row in await cursor.fetchall()}
+        if "image_model" not in scene_columns:
+            await db.execute("ALTER TABLE scene ADD COLUMN image_model TEXT")
+            logger.info("Migrated: added image_model column to scene table")
+        # Migration: add image_model to character table
+        cursor = await db.execute("PRAGMA table_info(character)")
+        character_columns = {row[1] for row in await cursor.fetchall()}
+        if "image_model" not in character_columns:
+            await db.execute("ALTER TABLE character ADD COLUMN image_model TEXT")
+            logger.info("Migrated: added image_model column to character table")
+        # Migration: add duration_ms to refgen_result (generation duration)
+        cursor = await db.execute("PRAGMA table_info(refgen_result)")
+        refgen_columns = {row[1] for row in await cursor.fetchall()}
+        if "duration_ms" not in refgen_columns:
+            await db.execute("ALTER TABLE refgen_result ADD COLUMN duration_ms INTEGER")
+            logger.info("Migrated: added duration_ms column to refgen_result table")
         # Migration: ensure request table CHECK constraint includes all request types
         # SQLite can't alter CHECK constraints, so recreate the table
         cursor = await db.execute("SELECT sql FROM sqlite_master WHERE name='request' AND type='table'")

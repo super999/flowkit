@@ -13,6 +13,7 @@ class CharacterInput(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str
+    flow_project_id: Optional[str] = None  # Existing Google Flow project UUID to link/import
     description: Optional[str] = None
     story: Optional[str] = None
     language: str = "en"

@@ -269,10 +269,29 @@ document.getElementById('main-toggle').addEventListener('change', (e) => {
 // ── Action buttons ───────────────────────────────────────────
 
 document.getElementById('btn-flow').addEventListener('click', () => {
-  chrome.runtime.sendMessage({ type: 'OPEN_FLOW_TAB' }, () => {
-    if (chrome.runtime.lastError) return;
+  chrome.runtime.sendMessage({ type: 'OPEN_FLOW_TAB' }, (resp) => {
+    if (chrome.runtime.lastError) {
+      showToast('Error: ' + (chrome.runtime.lastError.message || 'unknown'));
+      return;
+    }
+    if (resp && resp.error) showToast('Error: ' + resp.error);
+    else showToast('Flow tab ready');
   });
 });
+
+function showToast(text) {
+  let el = document.getElementById('toast-msg');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast-msg';
+    el.style.cssText = 'position:fixed;bottom:8px;left:8px;right:8px;padding:8px;border-radius:8px;background:#1f2937;color:#e5e7eb;font-size:12px;z-index:999;text-align:center;';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.style.opacity = '1';
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.style.opacity = '0'; }, 2500);
+}
 
 document.getElementById('btn-token').addEventListener('click', () => {
   const btn = document.getElementById('btn-token');

@@ -179,6 +179,7 @@ class Repository(ABC):
         parent_scene_id: Optional[str] = None,
         chain_type: str = "ROOT",
         source: str = "root",
+        image_model: Optional[str] = None,
     ) -> Scene:
         """Insert a new scene row and return the Scene."""
 

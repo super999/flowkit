@@ -1,0 +1,55 @@
+# Walkthrough: Google Flow tRPC API 逆向 & FlowKit 集成
+
+## 目标
+逆向 Google Flow 的 tRPC API，获取项目列表和媒体数据的接口，并集成到 FlowKit 后端。
+
+## 完成的工作
+
+### 1. tRPC API 逆向工程（7 轮探测）
+
+通过下载并分析 5.2MB 混淆 JS 包，提取候选端点名，然后通过 FlowKit 扩展代理逐一发送请求验证。
+
+**已确认的端点：**
+
+| 端点 | 说明 |
+|------|------|
+| `project.searchUserProjects` | 列出用户所有项目（需 `toolName`, `pageSize`） |
+| `project.getProject` | 获取单个项目元信息 |
+| `media.fetchUserHistory` | 获取用户媒体历史（需 `toolName`, `limit`, `type: "FLOW"`） |
+| `project.searchProjectScenes` | 搜索项目场景（存在但参数未完全破解） |
+| `media.fetchMedia` | 获取单条媒体（存在但需要特殊 mediaKey 格式） |
+
+### 2. FlowKit 后端集成
+
+#### [flow_client.py](file:///d:/python_workspace/flowkit/agent/services/flow_client.py) — 新增 5 个方法
+
+| 方法 | 说明 |
+|------|------|
+| `search_user_projects()` | 通过 `project.searchUserProjects` tRPC 获取项目列表 |
+| `get_project()` | 通过 `project.getProject` 获取项目元信息 |
+| `fetch_user_history()` | 通过 `media.fetchUserHistory` 获取媒体历史 |
+| `fetch_project_media()` | 调用 `fetch_user_history` 并按 `projectId` 过滤 |
+
+#### [flow.py](file:///d:/python_workspace/flowkit/agent/api/flow.py) — 新增 5 个 REST 端点
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/flow/projects` | 列出所有 Flow 项目 |
+| `GET /api/flow/projects/{id}` | 获取单个项目 |
+| `GET /api/flow/projects/{id}/media` | 获取项目所有媒体 |
+| `GET /api/flow/history` | 获取用户媒体历史 |
+| `POST /api/flow/trpc-proxy` | 通用 tRPC 代理（调试用） |
+
+### 3. 测试验证
+
+- ✅ `/api/flow/projects` → 返回 8 个项目
+- ✅ `/api/flow/projects/{id}/media?limit=20` → 返回 20 个媒体项
+- ✅ `/api/flow/history?limit=20` → 返回 20 条工作流记录
+- ✅ 每个媒体包含 `mediaKey`（UUID）、`prompt`、`modelName`、`aspectRatio`、`createTime`
+
+### 关键发现
+
+- `pageSize > 10` 会导致 `searchUserProjects` 返回 Bad Request
+- `limit` 在 `fetchUserHistory` 中最大可到 20（更大值需测试）
+- 所有 tRPC 端点需要 `toolName: "PINHOLE"` 参数
+- `media.fetchUserHistory` 的 `type` 必须是 `FLOW`（非 IMAGE/VIDEO）

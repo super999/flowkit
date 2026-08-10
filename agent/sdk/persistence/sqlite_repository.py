@@ -52,6 +52,7 @@ class SQLiteRepository(Repository):
             voice_description=row.get("voice_description"),
             reference_image_url=row.get("reference_image_url"),
             media_id=row.get("media_id"),
+            image_model=row.get("image_model"),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
             _repo=self,
@@ -95,6 +96,7 @@ class SQLiteRepository(Repository):
             "chain_type": scene.chain_type,
             "source": scene.source,
             "display_order": scene.display_order,
+            "image_model": scene.image_model,
             "trim_start": scene.trim_start,
             "trim_end": scene.trim_end,
             "duration": scene.duration,
@@ -243,6 +245,7 @@ class SQLiteRepository(Repository):
             voice_description=character.voice_description,
             reference_image_url=character.reference_image_url,
             media_id=character.media_id,
+            image_model=character.image_model,
         )
 
     async def create_character(
@@ -256,6 +259,7 @@ class SQLiteRepository(Repository):
         reference_image_url: Optional[str] = None,
         media_id: Optional[str] = None,
         slug: Optional[str] = None,
+        image_model: Optional[str] = None,
     ) -> Character:
         row = await crud.create_character(
             name=name,
@@ -266,6 +270,7 @@ class SQLiteRepository(Repository):
             reference_image_url=reference_image_url,
             media_id=media_id,
             slug=slug,
+            image_model=image_model,
         )
         return self._row_to_character(row)
 
@@ -358,6 +363,7 @@ class SQLiteRepository(Repository):
         parent_scene_id: Optional[str] = None,
         chain_type: str = "ROOT",
         source: str = "root",
+        image_model: Optional[str] = None,
     ) -> Scene:
         row = await crud.create_scene(
             video_id=video_id,
@@ -370,6 +376,7 @@ class SQLiteRepository(Repository):
             parent_scene_id=parent_scene_id,
             chain_type=chain_type,
             source=source,
+            image_model=image_model,
         )
         return self._row_to_scene(row)
 

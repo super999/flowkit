@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { fetchAPI, patchAPI } from '../api/client'
+import { fetchAPI, patchAPI, putAPI } from '../api/client'
+import ImageStudioModal from '../components/studio/ImageStudioModal'
 import type { Project, Character, Video, Scene, Request } from '../types'
 import EditableText from '../components/projects/EditableText'
 import PipelineView from '../components/pipeline/PipelineView'
@@ -45,13 +46,16 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
   const [requests, setRequests] = useState<Request[]>([])
   const [loading, setLoading] = useState(true)
   const [pipelineVideoId, setPipelineVideoId] = useState<string>('')
+  const [studioOpen, setStudioOpen] = useState(false)
+  const [isActive, setIsActive] = useState(false)
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
-    const [proj, chars, vids] = await Promise.all([
+    const [proj, chars, vids, active] = await Promise.all([
       fetchAPI<Project>(`/api/projects/${projectId}`),
       fetchAPI<Character[]>(`/api/projects/${projectId}/characters`),
       fetchAPI<Video[]>(`/api/videos?project_id=${projectId}`),
+      fetchAPI<{ project_id?: string }>('/api/active-project').catch(() => ({ project_id: '' }))
     ])
     const sceneLists = await Promise.all(vids.map(v => fetchAPI<Scene[]>(`/api/scenes?video_id=${v.id}`)))
     const sbv: Record<string, Scene[]> = {}
@@ -63,11 +67,17 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
     setVideos(vids)
     setScenesByVideo(sbv)
     setRequests(reqs)
+    setIsActive(active.project_id === projectId)
     setPipelineVideoId(prev => prev && vids.some(v => v.id === prev) ? prev : (vids[0]?.id ?? ''))
     setLoading(false)
   }, [projectId])
 
   useEffect(() => { Promise.resolve().then(fetchAll) }, [fetchAll])
+
+  async function handleSetActive() {
+    await putAPI('/api/active-project', { project_id: projectId })
+    setIsActive(true)
+  }
 
   function setTab(t: Tab) {
     setSearchParams(prev => {
@@ -105,12 +115,29 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
             <h1 className="m-0 text-lg font-semibold" style={{ color: 'var(--text)' }}>{project.name}</h1>
             <Badge variant="outline">{project.material}</Badge>
             <Badge variant="outline">{projectStatusLabel(t, project.status)}</Badge>
+            {isActive && <Badge variant="default">🎯 目标激活中</Badge>}
           </div>
           <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
             {t('projectDetail.header', { id: project.id, date: formatDate(project.created_at), videos: videos.length, scenes: allScenes.length })}
           </span>
         </div>
-        <Button variant="ghost" size="sm" onClick={onBack}>{t('projectDetail.back')}</Button>
+
+        <div className="flex items-center gap-2">
+          {!isActive && (
+            <Button size="sm" variant="outline" onClick={handleSetActive}>
+              ⭐ 设为全局目标项目
+            </Button>
+          )}
+          <Button
+            size="sm"
+            onClick={() => setStudioOpen(true)}
+            className="text-white shadow"
+            style={{ background: 'linear-gradient(135deg, #8b5cf6, #06b6d4)' }}
+          >
+            🎨 为此项目画图
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onBack}>{t('projectDetail.back')}</Button>
+        </div>
       </div>
 
       <Tabs value={tab} onValueChange={v => setTab(v as Tab)}>
@@ -296,6 +323,13 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
           )}
         </TabsContent>
       </Tabs>
+
+      <ImageStudioModal
+        open={studioOpen}
+        onClose={() => setStudioOpen(false)}
+        initialProjectId={projectId}
+        onSuccess={fetchAll}
+      />
     </div>
   )
 }

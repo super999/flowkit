@@ -198,6 +198,8 @@ function connectToAgent() {
         await handleApiRequest(msg);
       } else if (msg.method === 'trpc_request') {
         await handleTrpcRequest(msg);
+      } else if (msg.method === 'fetch_redirect') {
+        await handleFetchRedirect(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
       } else if (msg.method === 'get_status') {
@@ -264,6 +266,33 @@ function sendToAgent(msg) {
   // Non-response messages (ping, status) or no secret yet — use WS
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
+  }
+}
+
+// ─── Fetch redirect: resolve media.getMediaUrlRedirect → final signed URL ──
+async function handleFetchRedirect(msg) {
+  const { id, params } = msg;
+  const { url } = params || {};
+  if (!url || !url.startsWith('https://labs.google/')) {
+    sendToAgent({ id, error: 'INVALID_URL' });
+    return;
+  }
+  if (!flowKey) {
+    sendToAgent({ id, status: 503, error: 'NO_FLOW_KEY' });
+    return;
+  }
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${flowKey}` },
+      credentials: 'include',
+      redirect: 'follow',
+    });
+    // For cross-origin redirects the final URL is available even if the
+    // response body is opaque — that's all we need.
+    sendToAgent({ id, status: resp.status, finalUrl: resp.url });
+  } catch (e) {
+    sendToAgent({ id, error: e.message || 'FETCH_REDIRECT_FAILED' });
   }
 }
 
@@ -565,12 +594,16 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'OPEN_FLOW_TAB') {
-    chrome.tabs.query({
-      url: ['https://labs.google/fx/tools/flow*', 'https://labs.google/fx/*/tools/flow*'],
-    }).then((tabs) => {
-      if (tabs.length) {
-        chrome.tabs.update(tabs[0].id, { active: true });
-        reply({ ok: true, tabId: tabs[0].id });
+    chrome.tabs.query({}).then((allTabs) => {
+      const flowTab = allTabs.find(t =>
+        t.url && t.url.includes('labs.google') && t.url.includes('/tools/flow')
+      );
+      if (flowTab) {
+        chrome.tabs.update(flowTab.id, { active: true });
+        if (flowTab.windowId !== undefined) {
+          chrome.windows.update(flowTab.windowId, { focused: true });
+        }
+        reply({ ok: true, tabId: flowTab.id });
       } else {
         chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow' })
           .then((tab) => reply({ ok: true, tabId: tab.id }))
@@ -600,6 +633,29 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
     return true;
   }
 
+  if (msg.type === 'CAPTURE_API_REQ') {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'api_request_capture',
+        url: msg.reqUrl,
+        body: msg.body,
+      }));
+    }
+    reply({ ok: true });
+    return true;
+  }
+
+  if (msg.type === 'PAGE_SCAN_REPORT') {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'page_scan_report',
+        detail: msg.detail,
+      }));
+    }
+    reply({ ok: true });
+    return true;
+  }
+
   return true;
 });
 
@@ -607,8 +663,8 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
 
 function handleTrpcMediaUrls(trpcUrl, bodyText) {
   try {
-    // Extract all fresh GCS signed URLs
-    const urlRegex = /https:\/\/storage\.googleapis\.com\/ai-sandbox-videofx\/(?:image|video)\/[0-9a-f-]{36}\?[^"'\s]+/g;
+    // Extract all fresh GCS/CDN signed URLs (storage.googleapis + flow-content CDN)
+    const urlRegex = /https:\/\/storage\.googleapis\.com\/ai-sandbox-videofx\/(?:image|video)\/[0-9a-f-]{36}\?[^"'\s]+|https:\/\/flow-content\.google\/(?:image|video)\/[0-9a-f-]{36}\?[^"'\s]+/g;
     const matches = bodyText.match(urlRegex) || [];
     if (!matches.length) return;
 

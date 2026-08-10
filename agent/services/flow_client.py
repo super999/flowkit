@@ -9,6 +9,8 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from agent.config import (
@@ -171,6 +173,65 @@ class FlowClient:
             "uptime_s": uptime,
         }
 
+    async def resolve_media_url(self, media_id: str) -> str:
+        """Resolve a media id to its real signed URL via the extension.
+
+        The Flow web UI serves images through media.getMediaUrlRedirect, which
+        302-redirects to the actual CDN URL. The extension follows the redirect
+        and reports the final URL (cross-origin body is opaque, URL is enough).
+        """
+        url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}"
+        result = await self._send("fetch_redirect", {"url": url}, timeout=30)
+        final = result.get("finalUrl", "")
+        if not final or final == url or final.endswith(media_id):
+            return ""
+        return final
+
+    async def _handle_page_scan(self, detail: dict):
+        """Resolve media ids reported by the page scan into real URLs (flow_media)."""
+        from agent.db import crud
+
+        media_ids = detail.get("mediaIds") or []
+        if not media_ids:
+            return
+        try:
+            existing = {r["media_id"] for r in await crud.list_flow_media()}
+        except Exception:
+            existing = set()
+
+        todo = [mid for mid in media_ids if mid not in existing]
+        if not todo:
+            logger.info("Page scan: all %d media already in library", len(media_ids))
+            return
+
+        logger.info("Page scan: resolving %d new media ids → flow_media", len(todo))
+        # Resolve in small batches to be gentle on the extension
+        import asyncio as _asyncio
+        for i in range(0, len(todo), 4):
+            batch = todo[i:i + 4]
+            results = await _asyncio.gather(*[
+                self.resolve_media_url(mid) for mid in batch
+            ], return_exceptions=True)
+            for mid, url in zip(batch, results):
+                if isinstance(url, Exception) or not url:
+                    logger.warning("Media %s resolve failed: %s", mid[:12], url if isinstance(url, Exception) else "no final URL")
+                    continue
+                try:
+                    media_type = "video" if "/video/" in url else "image"
+                    await crud.upsert_flow_media(mid, media_type, url)
+                    logger.info("Media %s → %s", mid[:12], url[:60])
+                except Exception as e:
+                    logger.warning("flow_media upsert failed for %s: %s", mid[:12], e)
+            await _asyncio.sleep(1.0)
+        await self._after_media_sync(len(todo))
+
+    async def _after_media_sync(self, count: int):
+        try:
+            from agent.services.event_bus import event_bus
+            await event_bus.emit("media_synced", {"count": count})
+        except Exception:
+            pass
+
     async def handle_message(self, data: dict, websocket=None):
         """Handle incoming message from extension."""
         if data.get("type") == "token_captured":
@@ -192,6 +253,44 @@ class FlowClient:
 
         if data.get("type") == "media_urls_refresh":
             asyncio.create_task(self._refresh_media_urls(data.get("urls", [])))
+            return
+
+        if data.get("type") == "page_scan_report":
+            # Debug diagnostics + media ids from the extension's DOM media scan
+            try:
+                capture_dir = Path(__file__).parent.parent.parent / "output" / "_shared"
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                cap_file = capture_dir / "page_scan_reports.jsonl"
+                with open(cap_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "ts": datetime.now().isoformat(),
+                        **{k: v for k, v in (data.get("detail") or {}).items() if k != "mediaIds"},
+                        "mediaIds": (data.get("detail") or {}).get("mediaIds", []),
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # Resolve the reported media ids into real URLs
+            asyncio.create_task(self._handle_page_scan(data.get("detail") or {}))
+            return
+
+        if data.get("type") == "api_request_capture":
+            # Raw request payload captured from the Flow web UI (debugging tool)
+            try:
+                url = data.get("url", "")
+                if "upsampleImage" not in url and "batchGenerateImages" not in url and "/api/trpc/" not in url:
+                    return
+                capture_dir = Path(__file__).parent.parent.parent / "output" / "_shared"
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                cap_file = capture_dir / "captured_api_requests.jsonl"
+                with open(cap_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "ts": datetime.now().isoformat(),
+                        "url": url,
+                        "body": data.get("body", ""),
+                    }, ensure_ascii=False) + "\n")
+                logger.info("Captured Flow web API request → output/_shared/captured_api_requests.jsonl")
+            except Exception as e:
+                logger.warning("Failed to save captured API request: %s", e)
             return
 
         if data.get("type") == "pong":
@@ -235,12 +334,13 @@ class FlowClient:
             self._sync_in_progress = False
 
     _UUID_RE = __import__("re").compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-    _SAFE_URL_RE = __import__("re").compile(r'^https://(storage\.googleapis\.com|lh3\.googleusercontent\.com)/')
+    _SAFE_URL_RE = __import__("re").compile(r'^https://(storage\.googleapis\.com|lh3\.googleusercontent\.com|flow-content\.google)/')
 
     async def _refresh_media_urls(self, urls: list[dict]):
         """Update scene/character URLs in DB from fresh TRPC-captured signed URLs.
 
         Each entry: {mediaId: str, mediaType: 'image'|'video', url: str}
+        Also stores every entry into flow_media (powers the project media library).
         """
         from agent.db import crud
         from agent.services.event_bus import event_bus
@@ -261,6 +361,12 @@ class FlowClient:
                 continue
             if media_type not in ("image", "video"):
                 continue
+
+            # Record into the flow_media library (all project media)
+            try:
+                await crud.upsert_flow_media(media_id, media_type, url)
+            except Exception as e:
+                logger.warning("flow_media upsert failed for %s: %s", media_id[:12], e)
 
             # Try matching against scenes (check both orientations)
             scenes = await crud.list_scenes_by_media_id(media_id)
@@ -407,15 +513,145 @@ class FlowClient:
             "body": body,
         }, timeout=30)
 
+    async def search_user_projects(self, page_size: int = 10,
+                                    tool_name: str = "PINHOLE") -> list[dict]:
+        """List all user projects from Google Flow.
+
+        Returns list of project dicts with keys:
+          projectId, projectInfo.projectTitle, projectInfo.thumbnailMediaKey,
+          creationTime, agentInfo
+        """
+        import urllib.parse
+        input_data = {"json": {"toolName": tool_name, "pageSize": page_size}}
+        encoded = urllib.parse.quote(json.dumps(input_data))
+        url = f"https://labs.google/fx/api/trpc/project.searchUserProjects?input={encoded}"
+
+        result = await self._send("trpc_request", {
+            "url": url,
+            "method": "GET",
+            "headers": {"content-type": "application/json"},
+        }, timeout=30)
+
+        # Navigate: data.result.data.json.result.projects
+        try:
+            return result["data"]["result"]["data"]["json"]["result"]["projects"]
+        except (KeyError, TypeError) as e:
+            logger.warning("search_user_projects: parse failed: %s", e)
+            return []
+
+    async def get_project(self, project_id: str,
+                           tool_name: str = "PINHOLE") -> dict:
+        """Get project metadata from Google Flow.
+
+        Returns dict with projectId, projectInfo, agentInfo.
+        """
+        import urllib.parse
+        input_data = {"json": {"projectId": project_id, "toolName": tool_name}}
+        encoded = urllib.parse.quote(json.dumps(input_data))
+        url = f"https://labs.google/fx/api/trpc/project.getProject?input={encoded}"
+
+        result = await self._send("trpc_request", {
+            "url": url,
+            "method": "GET",
+            "headers": {"content-type": "application/json"},
+        }, timeout=30)
+
+        try:
+            return result["data"]["result"]["data"]["json"]["result"]
+        except (KeyError, TypeError):
+            logger.warning("get_project: unexpected response shape: %s",
+                           json.dumps(result)[:300])
+            return {}
+
+    async def fetch_user_history(self, limit: int = 20,
+                                  history_type: str = "FLOW",
+                                  tool_name: str = "PINHOLE") -> list[dict]:
+        """Fetch user media history from Google Flow.
+
+        Args:
+            limit: Max number of workflows to return.
+            history_type: One of MUSIC_FX, IMAGE_FX, VIDEO_FX, MUSIC_FX_DJ,
+                          BACKBONE, FLOW.
+            tool_name: Tool name filter.
+
+        Returns list of workflow dicts, each containing:
+          - media.mediaGenerationId.projectId
+          - media.mediaGenerationId.mediaKey (UUID)
+          - media.mediaGenerationId.mediaType (IMAGE/VIDEO)
+          - media.image.prompt / media.video.prompt
+          - createTime
+        """
+        import urllib.parse
+        input_data = {"json": {
+            "toolName": tool_name,
+            "limit": limit,
+            "type": history_type,
+        }}
+        encoded = urllib.parse.quote(json.dumps(input_data))
+        url = f"https://labs.google/fx/api/trpc/media.fetchUserHistory?input={encoded}"
+
+        result = await self._send("trpc_request", {
+            "url": url,
+            "method": "GET",
+            "headers": {"content-type": "application/json"},
+        }, timeout=60)
+
+        try:
+            return result["data"]["result"]["data"]["json"]["result"]["userWorkflows"]
+        except (KeyError, TypeError) as e:
+            logger.warning("fetch_user_history: parse failed: %s", e)
+            return []
+
+    async def fetch_project_media(self, project_id: str,
+                                    limit: int = 50) -> list[dict]:
+        """Fetch all media for a specific project.
+
+        Calls fetch_user_history and filters by projectId.
+
+        Returns list of dicts with keys:
+          mediaKey, mediaType, prompt, modelName, aspectRatio,
+          workflowId, createTime
+        """
+        workflows = await self.fetch_user_history(limit=limit)
+        results = []
+        for wf in workflows:
+            media = wf.get("media", {})
+            gen_id = media.get("mediaGenerationId", {})
+            if gen_id.get("projectId") != project_id:
+                continue
+
+            img = media.get("image", {})
+            vid = media.get("video", {})
+            prompt = img.get("prompt", "") or vid.get("prompt", "")
+            model = img.get("modelNameType", "") or vid.get("modelNameType", "")
+            aspect = img.get("aspectRatio", "") or vid.get("aspectRatio", "")
+
+            results.append({
+                "mediaKey": gen_id.get("mediaKey", ""),
+                "mediaType": gen_id.get("mediaType", ""),
+                "prompt": prompt,
+                "modelName": model,
+                "aspectRatio": aspect,
+                "workflowId": gen_id.get("workflowId", ""),
+                "createTime": wf.get("createTime", ""),
+            })
+
+        return results
+
     async def generate_images(self, prompt: str, project_id: str,
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                                user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                               character_media_ids: list[str] = None) -> dict:
+                               character_media_ids: list[str] = None,
+                               image_model: str = None,
+                               source_media_id: str = None) -> dict:
         """Generate image(s).
 
         If character_media_ids is provided, uses edit_image flow (batchGenerateImages
         with imageInputs) — same endpoint, but includes character references.
         Without characters, uses plain generate_images.
+
+        image_model overrides the model (e.g. GEM_PIX_2_UPSAMPLE_2K / _4K for
+        resolution upsampling). source_media_id adds the source as BASE_IMAGE input.
 
         Response structure:
             data.media[].name = mediaId (used for video gen)
@@ -428,7 +664,7 @@ class FlowClient:
             "seed": ts % 1000000,
             "structuredPrompt": {"parts": [{"text": prompt}]},
             "imageAspectRatio": aspect_ratio,
-            "imageModelName": IMAGE_MODELS["NANO_BANANA_PRO"],
+            "imageModelName": image_model or IMAGE_MODELS["NANO_BANANA_PRO"],
         }
 
         # Add character references if provided (edit_image flow)
@@ -436,6 +672,11 @@ class FlowClient:
             request_item["imageInputs"] = [
                 {"name": mid, "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE"}
                 for mid in character_media_ids
+            ]
+        if source_media_id:
+            request_item["imageInputs"] = [
+                {"name": source_media_id, "imageInputType": "IMAGE_INPUT_TYPE_BASE_IMAGE"},
+                *(request_item.get("imageInputs") or []),
             ]
 
         batch_id = f"{uuid.uuid4()}" if character_media_ids else None
@@ -501,6 +742,39 @@ class FlowClient:
             "body": body,
             "captchaAction": "IMAGE_GENERATION",
         })
+
+    async def upscale_image(self, media_id: str, project_id: str = "",
+                            target_resolution: str = "UPSAMPLE_IMAGE_RESOLUTION_4K",
+                            user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
+        """Upscale an existing image to 2K/4K via /v1/flow/upsampleImage.
+
+        Exact request format captured from Flow web UI:
+            {mediaId, targetResolution, clientContext{recaptchaContext, projectId, tool, userPaygateTier, sessionId}}
+        Response contains the upscaled media (new mediaId + fifeUrl).
+        """
+        ts = int(time.time() * 1000)
+        body = {
+            "mediaId": media_id,
+            "targetResolution": target_resolution,
+            "clientContext": {
+                "recaptchaContext": {
+                    "token": "",
+                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
+                },
+                "projectId": str(project_id),
+                "tool": "PINHOLE",
+                "userPaygateTier": user_paygate_tier,
+                "sessionId": f";{ts}",
+            },
+        }
+        url = self._build_url("upscale_image")
+        return await self._send("api_request", {
+            "url": url,
+            "method": "POST",
+            "headers": random_headers(),
+            "body": body,
+            "captchaAction": "IMAGE_GENERATION",
+        }, timeout=300)
 
     async def generate_video(self, start_image_media_id: str, prompt: str,
                               project_id: str, scene_id: str,

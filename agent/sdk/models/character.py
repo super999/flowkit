@@ -26,6 +26,7 @@ class Character(DomainModel):
     voice_description: Optional[str] = None
     reference_image_url: Optional[str] = None
     media_id: Optional[str] = None
+    image_model: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -48,6 +49,7 @@ class Character(DomainModel):
             "voice_description": self.voice_description,
             "reference_image_url": self.reference_image_url,
             "media_id": self.media_id,
+            "image_model": self.image_model,
         }
 
     # ------------------------------------------------------------------

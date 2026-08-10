@@ -13,7 +13,30 @@ def _get_repo() -> SQLiteRepository:
 @router.post("", response_model=Character)
 async def create(body: CharacterCreate):
     repo = _get_repo()
-    return await repo.create_character(**body.model_dump(exclude_none=True))
+    char_data = body.model_dump(exclude_none=True)
+    project_id = char_data.pop("project_id", None)
+    material_id = char_data.pop("material", None)
+    if "type" in char_data and "entity_type" not in char_data:
+        char_data["entity_type"] = char_data.pop("type")
+
+    # Bake a material style into the reference image prompt (unless the user
+    # supplied their own image_prompt or chose "none" = write style themselves)
+    if material_id and material_id != "none" and not char_data.get("image_prompt"):
+        from agent.api.projects import _build_character_profile
+        profile = _build_character_profile(
+            body.name,
+            body.description,
+            None,
+            entity_type=char_data.get("entity_type", "character"),
+            material_id=material_id,
+        )
+        char_data["description"] = profile["description"]
+        char_data["image_prompt"] = profile["image_prompt"]
+
+    char = await repo.create_character(**char_data)
+    if project_id:
+        await repo.link_character_to_project(project_id, char.id)
+    return char
 
 
 @router.get("", response_model=list[Character])
