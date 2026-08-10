@@ -4,23 +4,36 @@ import { Card, CardHeader, CardTitle, CardContent } from '../../components/ui/ca
 import { Button } from '../../components/ui/button'
 
 interface LibItem { id: string; media_id: string; name: string; thumb: string; created_at: string }
-interface ProjectMedia { media_id: string; media_type: string; url: string; in_project: boolean; updated_at: string }
+interface FlowProject { projectId: string; projectInfo?: { projectTitle?: string; thumbnailMediaKey?: string }; creationTime?: string }
+interface FlowMedia { mediaKey: string; mediaType: string; prompt?: string; modelName?: string; aspectRatio?: string; workflowId?: string; createTime?: string }
 
-// Merged view item: local library entries + project media (from Flow)
+// Merged view item: local library entries + live Flow project media
 interface ViewItem {
   key: string
   mediaId: string
   name: string
   thumb: string
   source: 'library' | 'project'
-  inProject: boolean
   libId?: string
   created: string
+  modelName?: string
+  aspectRatio?: string
+  mediaType?: string
+}
+
+const REDIRECT_URL = (key: string) => `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${key}`
+
+const ASPECT_LABELS: Record<string, string> = {
+  IMAGE_ASPECT_RATIO_PORTRAIT: '9:16',
+  IMAGE_ASPECT_RATIO_LANDSCAPE: '16:9',
+  IMAGE_ASPECT_RATIO_SQUARE: '1:1',
+  IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR: '3:4',
+  IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE: '4:3',
 }
 
 export default function ReferenceLibraryPage() {
   const [items, setItems] = useState<ViewItem[]>([])
-  const [projects, setProjects] = useState<{ id: string; name: string }[]>([])
+  const [projects, setProjects] = useState<FlowProject[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(0)
@@ -51,9 +64,10 @@ export default function ReferenceLibraryPage() {
     setLoading(true)
     try {
       const lib = await fetchAPI<LibItem[]>('/api/ref-images')
-      let projMedia: ProjectMedia[] = []
+      let projMedia: FlowMedia[] = []
       if (selectedProjectId) {
-        projMedia = await fetchAPI<ProjectMedia[]>(`/api/projects/${selectedProjectId}/media`).catch(() => [])
+        const res = await fetchAPI<{ total: number; media: FlowMedia[] }>(`/api/flow/projects/${selectedProjectId}/media?limit=20`).catch(() => null)
+        projMedia = res?.media || []
       }
 
       const merged: ViewItem[] = [
@@ -63,20 +77,21 @@ export default function ReferenceLibraryPage() {
           name: l.name || '参考图',
           thumb: l.thumb || '',
           source: 'library' as const,
-          inProject: true,
           libId: l.id,
           created: l.created_at || '',
         })),
         ...projMedia
-          .filter(p => !lib.some(l => l.media_id === p.media_id)) // dedupe with library
+          .filter(p => p.mediaKey && !lib.some(l => l.media_id === p.mediaKey)) // dedupe with library
           .map(p => ({
-            key: `proj_${p.media_id}`,
-            mediaId: p.media_id,
-            name: `${p.media_type === 'video' ? '🎬' : '🖼️'} ${p.media_id.slice(0, 8)}`,
-            thumb: p.url,
+            key: `proj_${p.mediaKey}`,
+            mediaId: p.mediaKey,
+            name: p.prompt ? (p.prompt.length > 40 ? p.prompt.slice(0, 40) + '…' : p.prompt) : (p.modelName || '项目媒体'),
+            thumb: REDIRECT_URL(p.mediaKey),
             source: 'project' as const,
-            inProject: p.in_project,
-            created: p.updated_at || '',
+            created: p.createTime || '',
+            modelName: p.modelName,
+            aspectRatio: p.aspectRatio,
+            mediaType: p.mediaType,
           })),
       ]
       setItems(merged)
@@ -96,12 +111,12 @@ export default function ReferenceLibraryPage() {
         }
         const lib2 = await fetchAPI<LibItem[]>('/api/ref-images').catch(() => lib)
         setItems(prev => [
-          ...lib2.map(l => ({ key: `lib_${l.id}`, mediaId: l.media_id, name: l.name || '参考图', thumb: l.thumb || '', source: 'library' as const, inProject: true, libId: l.id, created: l.created_at || '' })),
+          ...lib2.map(l => ({ key: `lib_${l.id}`, mediaId: l.media_id, name: l.name || '参考图', thumb: l.thumb || '', source: 'library' as const, libId: l.id, created: l.created_at || '' })),
           ...prev.filter(v => v.source === 'project'),
         ])
         setStatusMsg(`✅ 已把 ${missing.length} 张历史上传图片迁移进图库`)
       } else if (notify) {
-        setStatusMsg('✅ 已刷新')
+        setStatusMsg(`✅ 已刷新（Flow 项目媒体 ${projMedia.length} 条 + 本地图库 ${lib.length} 张）`)
       }
     } catch {
       setStatusMsg('❌ 加载失败，请确认后端已启动')
@@ -110,20 +125,26 @@ export default function ReferenceLibraryPage() {
     }
   }
 
-  useEffect(() => { loadAll(true) }, [selectedProjectId])
-
+  // Load real Flow projects for the dropdown
   useEffect(() => {
-    fetchAPI<{ id: string; name: string }[]>('/api/projects')
-      .then(ps => {
+    fetchAPI<{ projects: FlowProject[] }>('/api/flow/projects')
+      .then(res => {
+        const ps = res.projects || []
         setProjects(ps)
+        // Preselect the linked/local active project if it exists in Flow
         return fetchAPI<{ project_id?: string }>('/api/active-project').catch(() => ({ project_id: '' }))
       })
       .then(active => {
-        if (active.project_id && projects.some(p => p.id === active.project_id)) setSelectedProjectId(active.project_id)
-        else if (projects.length > 0) setSelectedProjectId(projects[0].id)
+        if (active.project_id && projects.some(p => p.projectId === active.project_id)) {
+          setSelectedProjectId(active.project_id)
+        } else if (projects.length > 0) {
+          setSelectedProjectId(projects[0].projectId)
+        }
       })
-      .catch(() => {})
+      .catch(() => setStatusMsg('❌ 项目列表加载失败（扩展是否已连接？）'))
   }, [])
+
+  useEffect(() => { if (projects.length > 0 || selectedProjectId) loadAll() }, [selectedProjectId])
 
   function addToRefs(item: ViewItem) {
     const list = readCurrentRefs()
@@ -200,7 +221,7 @@ export default function ReferenceLibraryPage() {
 
   async function deleteItem(item: ViewItem) {
     if (item.source !== 'library' || !item.libId) {
-      alert('项目媒体来自 Flow 同步数据，不能直接删除（可在 Flow 网页中管理）')
+      alert('项目媒体来自 Flow 云端，不能直接删除（可在 Flow 网页中管理）')
       return
     }
     if (!confirm(`从图库删除「${item.name}」？（云端图片保留）`)) return
@@ -220,7 +241,7 @@ export default function ReferenceLibraryPage() {
             <div className="flex flex-col">
               <span className="text-sm font-bold tracking-wide">参考图库 (Reference Library)</span>
               <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-                本地图库（上传的参考图）+ Flow 项目媒体（打开 Flow 项目页自动同步，生成/上传的都在）
+                本地上传图 + Flow 项目媒体（实时拉取，图片以缩略图形式直接显示）
               </span>
             </div>
           </div>
@@ -228,12 +249,14 @@ export default function ReferenceLibraryPage() {
             <select
               value={selectedProjectId}
               onChange={e => { setSelectedProjectId(e.target.value); setPage(1) }}
-              className="px-2 py-1.5 rounded text-xs outline-none"
+              className="px-2 py-1.5 rounded text-xs outline-none max-w-56"
               style={{ background: 'var(--card)', color: 'var(--text)', border: '1px solid var(--border)' }}
             >
-              <option value="">全部项目媒体</option>
+              <option value="">— 选择 Flow 项目 —</option>
               {projects.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
+                <option key={p.projectId} value={p.projectId}>
+                  {p.projectInfo?.projectTitle || p.projectId.slice(0, 8)}
+                </option>
               ))}
             </select>
             <Button size="sm" variant="outline" disabled={loading} onClick={() => loadAll(true)}>
@@ -277,15 +300,21 @@ export default function ReferenceLibraryPage() {
       <Card className="py-4">
         <CardHeader>
           <CardTitle className="text-xs font-semibold uppercase tracking-wider flex items-center justify-between">
-            <span>全部参考图 ({items.length}){uploading > 0 ? ` — ⏳ 上传中 (${uploading})...` : ''}</span>
+            <span>
+              全部参考图 ({items.length})
+              {uploading > 0 ? ` — ⏳ 上传中 (${uploading})...` : ''}
+              {selectedProjectId ? '' : ' — 请先选择一个 Flow 项目'}
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           {items.length === 0 ? (
             <div className="p-8 text-center text-xs border rounded-lg border-dashed" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
-              暂无图片。两个来源：<br />
-              ① 粘贴/上传的图片自动存入本地图库<br />
-              ② Flow 项目媒体：<b>打开 Flow 项目页（labs.google/fx）一次</b>，项目里所有生成/上传的图片会自动同步进来
+              {projects.length === 0 ? (
+                <>项目列表为空 — 请确认 Chrome 扩展已连接且已登录 labs.google/fx</>
+              ) : (
+                <>暂无图片。选择上方项目后可看到其全部媒体；粘贴/上传的图片会自动存入本地图库（显示在最上方）。<br />提示：Flow 接口单次最多返回 20 条媒体（API 限制）</>
+              )}
             </div>
           ) : (
             <>
@@ -296,7 +325,12 @@ export default function ReferenceLibraryPage() {
                     <div key={item.key} className="p-1.5 rounded-lg border flex flex-col gap-1.5" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                       <div className="w-full aspect-square rounded overflow-hidden bg-black flex items-center justify-center border" style={{ borderColor: 'var(--border)' }}>
                         {item.thumb ? (
-                          <img src={item.thumb} alt={item.name} className="w-full h-full object-cover" />
+                          <img
+                            src={item.thumb}
+                            alt={item.name}
+                            className="w-full h-full object-cover"
+                            onError={(e) => { (e.target as HTMLElement).style.visibility = 'hidden' }}
+                          />
                         ) : (
                           <span className="text-[9px]" style={{ color: 'var(--muted)' }}>无缩略图</span>
                         )}
@@ -304,10 +338,13 @@ export default function ReferenceLibraryPage() {
                       <span className="text-[9px] truncate flex items-center gap-1" style={{ color: 'var(--text)' }} title={item.name}>
                         {item.name || '参考图'}
                         {item.source === 'project' && (
-                          <span className="text-[7px] px-1 rounded" style={{ background: 'color-mix(in srgb, var(--accent) 15%, transparent)', color: 'var(--accent)' }}>
-                            Flow
+                          <span className="text-[7px] px-1 rounded flex-shrink-0" style={{ background: 'color-mix(in srgb, var(--accent) 15%, transparent)', color: 'var(--accent)' }}>
+                            {item.mediaType === 'VIDEO' ? '🎬' : 'Flow'}
                           </span>
                         )}
+                      </span>
+                      <span className="text-[8px] truncate" style={{ color: 'var(--muted)' }}>
+                        {[item.aspectRatio ? (ASPECT_LABELS[item.aspectRatio] || item.aspectRatio.split('_').pop()) : '', item.modelName || ''].filter(Boolean).join(' · ')}
                       </span>
                       <span className="text-[8px]" style={{ color: 'var(--muted)' }}>
                         {item.created ? new Date(item.created).toLocaleString() : ''}

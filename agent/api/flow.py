@@ -133,12 +133,15 @@ async def get_flow_project(project_id: str):
 
 
 @router.get("/projects/{project_id}/media")
-async def get_project_media(project_id: str, limit: int = 200):
-    """Get all media (images/videos) for a Google Flow project."""
+async def get_project_media(project_id: str, limit: int = 20):
+    """Get all media (images/videos) for a Google Flow project.
+
+    Note: the underlying media.fetchUserHistory API rejects limit > 20.
+    """
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    media = await client.fetch_project_media(project_id, limit=limit)
+    media = await client.fetch_project_media(project_id, limit=min(limit, 20))
     return {"project_id": project_id, "total": len(media), "media": media}
 
 
