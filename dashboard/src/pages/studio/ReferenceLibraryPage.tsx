@@ -22,6 +22,7 @@ interface ViewItem {
 }
 
 const REDIRECT_URL = (key: string) => `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${key}`
+const FLOW_CDN_URL = /^https:\/\/flow-content\.google\//i
 
 const ASPECT_LABELS: Record<string, string> = {
   IMAGE_ASPECT_RATIO_PORTRAIT: '9:16',
@@ -29,6 +30,16 @@ const ASPECT_LABELS: Record<string, string> = {
   IMAGE_ASPECT_RATIO_SQUARE: '1:1',
   IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR: '3:4',
   IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE: '4:3',
+}
+
+function sortByCreatedDesc(list: ViewItem[]): ViewItem[] {
+  return [...list].sort((a, b) => {
+    const timeA = a.created ? new Date(a.created).getTime() : 0
+    const timeB = b.created ? new Date(b.created).getTime() : 0
+    const validA = Number.isNaN(timeA) ? 0 : timeA
+    const validB = Number.isNaN(timeB) ? 0 : timeB
+    return validB - validA
+  })
 }
 
 export default function ReferenceLibraryPage() {
@@ -65,17 +76,33 @@ export default function ReferenceLibraryPage() {
     try {
       const lib = await fetchAPI<LibItem[]>('/api/ref-images')
       let projMedia: FlowMedia[] = []
+      let resolvedUrls: Record<string, string> = {}
+
       if (selectedProjectId) {
-        const res = await fetchAPI<{ total: number; media: FlowMedia[] }>(`/api/flow/projects/${selectedProjectId}/media?limit=20`).catch(() => null)
+        const res = await fetchAPI<{ total: number; media: FlowMedia[] }>(`/api/flow/projects/${selectedProjectId}/media?limit=60`).catch(() => null)
         projMedia = res?.media || []
       }
 
-      const merged: ViewItem[] = [
+      // Project-media URLs and Flow-backed library thumbnails are signed and
+      // expire. Refresh both so previously saved references do not render as
+      // black cards after their original URL expires.
+      const unmappedKeys = [...new Set([
+        ...projMedia.map(m => m.mediaKey),
+        ...lib.filter(l => FLOW_CDN_URL.test(l.thumb)).map(l => l.media_id),
+      ].filter(Boolean))]
+      if (unmappedKeys.length > 0) {
+        const resResolve = await postAPI<{ resolved: Record<string, string> }>('/api/flow/media/resolve', { media_ids: unmappedKeys }).catch(() => null)
+        if (resResolve?.resolved) {
+          resolvedUrls = resResolve.resolved
+        }
+      }
+
+      const merged: ViewItem[] = sortByCreatedDesc([
         ...lib.map(l => ({
           key: `lib_${l.id}`,
           mediaId: l.media_id,
           name: l.name || '参考图',
-          thumb: l.thumb || '',
+          thumb: resolvedUrls[l.media_id] || l.thumb || '',
           source: 'library' as const,
           libId: l.id,
           created: l.created_at || '',
@@ -85,15 +112,17 @@ export default function ReferenceLibraryPage() {
           .map(p => ({
             key: `proj_${p.mediaKey}`,
             mediaId: p.mediaKey,
-            name: p.prompt ? (p.prompt.length > 40 ? p.prompt.slice(0, 40) + '…' : p.prompt) : (p.modelName || '项目媒体'),
-            thumb: REDIRECT_URL(p.mediaKey),
+            name: p.prompt
+              ? (p.prompt.length > 40 ? p.prompt.slice(0, 40) + '…' : p.prompt)
+              : (p.modelName || (p.mediaType === 'VIDEO' ? `Flow 视频 (${p.mediaKey.slice(0, 6)})` : `Flow 图片 (${p.mediaKey.slice(0, 6)})`)),
+            thumb: resolvedUrls[p.mediaKey] || REDIRECT_URL(p.mediaKey),
             source: 'project' as const,
             created: p.createTime || '',
             modelName: p.modelName,
             aspectRatio: p.aspectRatio,
             mediaType: p.mediaType,
           })),
-      ]
+      ])
       setItems(merged)
       setMarked(readCurrentRefs().map(u => u.mediaId))
 
@@ -110,10 +139,10 @@ export default function ReferenceLibraryPage() {
           }).catch(() => {})
         }
         const lib2 = await fetchAPI<LibItem[]>('/api/ref-images').catch(() => lib)
-        setItems(prev => [
+        setItems(prev => sortByCreatedDesc([
           ...lib2.map(l => ({ key: `lib_${l.id}`, mediaId: l.media_id, name: l.name || '参考图', thumb: l.thumb || '', source: 'library' as const, libId: l.id, created: l.created_at || '' })),
           ...prev.filter(v => v.source === 'project'),
-        ])
+        ]))
         setStatusMsg(`✅ 已把 ${missing.length} 张历史上传图片迁移进图库`)
       } else if (notify) {
         setStatusMsg(`✅ 已刷新（Flow 项目媒体 ${projMedia.length} 条 + 本地图库 ${lib.length} 张）`)
@@ -127,18 +156,18 @@ export default function ReferenceLibraryPage() {
 
   // Load real Flow projects for the dropdown
   useEffect(() => {
+    let loadedProjects: FlowProject[] = []
     fetchAPI<{ projects: FlowProject[] }>('/api/flow/projects')
       .then(res => {
-        const ps = res.projects || []
-        setProjects(ps)
-        // Preselect the linked/local active project if it exists in Flow
+        loadedProjects = res.projects || []
+        setProjects(loadedProjects)
         return fetchAPI<{ project_id?: string }>('/api/active-project').catch(() => ({ project_id: '' }))
       })
       .then(active => {
-        if (active.project_id && projects.some(p => p.projectId === active.project_id)) {
+        if (active?.project_id && loadedProjects.some(p => p.projectId === active.project_id)) {
           setSelectedProjectId(active.project_id)
-        } else if (projects.length > 0) {
-          setSelectedProjectId(projects[0].projectId)
+        } else if (loadedProjects.length > 0) {
+          setSelectedProjectId(loadedProjects[0].projectId)
         }
       })
       .catch(() => setStatusMsg('❌ 项目列表加载失败（扩展是否已连接？）'))

@@ -5,7 +5,7 @@
  * Captures bearer token, solves reCAPTCHA, proxies API calls through browser.
  */
 
-const AGENT_WS_URL = 'ws://127.0.0.1:9222';
+const AGENT_WS_URL = 'ws://127.0.0.1:9223';
 // NOTE: This is a browser-restricted public API key — safe to ship in extension bundles.
 const API_KEY = 'AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY';
 
@@ -277,21 +277,50 @@ async function handleFetchRedirect(msg) {
     sendToAgent({ id, error: 'INVALID_URL' });
     return;
   }
-  if (!flowKey) {
-    sendToAgent({ id, status: 503, error: 'NO_FLOW_KEY' });
+
+  let tabs = await chrome.tabs.query({
+    url: ['https://labs.google/fx/tools/flow*', 'https://labs.google/fx/*/tools/flow*'],
+  });
+
+  if (!tabs.length) {
+    try {
+      await chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow', active: false });
+      await sleep(2500);
+      tabs = await chrome.tabs.query({
+        url: ['https://labs.google/fx/tools/flow*', 'https://labs.google/fx/*/tools/flow*'],
+      });
+    } catch (e) {
+      sendToAgent({ id, error: `NO_FLOW_TAB: ${e.message}` });
+      return;
+    }
+  }
+
+  if (!tabs.length) {
+    sendToAgent({ id, error: 'NO_FLOW_TAB' });
     return;
   }
+
+  const tabId = tabs[0].id;
   try {
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${flowKey}` },
-      credentials: 'include',
-      redirect: 'follow',
+    const res = await chrome.tabs.sendMessage(tabId, {
+      type: 'RESOLVE_REDIRECT',
+      url,
     });
-    // For cross-origin redirects the final URL is available even if the
-    // response body is opaque — that's all we need.
-    sendToAgent({ id, status: resp.status, finalUrl: resp.url });
+    sendToAgent({ id, status: res?.status || 200, finalUrl: res?.finalUrl || '', error: res?.error });
   } catch (e) {
+    const msgStr = e?.message || '';
+    if (msgStr.includes('Receiving end does not exist') || msgStr.includes('Could not establish connection')) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+        await sleep(200);
+        const res = await chrome.tabs.sendMessage(tabId, { type: 'RESOLVE_REDIRECT', url });
+        sendToAgent({ id, status: res?.status || 200, finalUrl: res?.finalUrl || '', error: res?.error });
+        return;
+      } catch (err) {
+        sendToAgent({ id, error: err.message || 'FETCH_REDIRECT_FAILED' });
+        return;
+      }
+    }
     sendToAgent({ id, error: e.message || 'FETCH_REDIRECT_FAILED' });
   }
 }

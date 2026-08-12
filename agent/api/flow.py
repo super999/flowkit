@@ -132,6 +132,7 @@ async def get_flow_project(project_id: str):
     return project
 
 
+
 @router.get("/projects/{project_id}/media")
 async def get_project_media(project_id: str, limit: int = 20):
     """Get all media (images/videos) for a Google Flow project.
@@ -141,7 +142,7 @@ async def get_project_media(project_id: str, limit: int = 20):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    media = await client.fetch_project_media(project_id, limit=min(limit, 20))
+    media = await client.fetch_project_media(project_id, limit=min(limit, 200))
     return {"project_id": project_id, "total": len(media), "media": media}
 
 
@@ -419,3 +420,18 @@ async def upload_image(body: UploadImageRequest):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
     media_id = result.get("_mediaId")
     return {"media_id": media_id, "raw": result.get("data", result)}
+
+
+class ResolveMediaBatchRequest(BaseModel):
+    media_ids: list[str]
+
+
+@router.post("/media/resolve")
+async def resolve_media_batch(body: ResolveMediaBatchRequest):
+    """Batch resolve mediaKeys to fresh signed CDN URLs."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    resolved = await client.resolve_media_urls(body.media_ids)
+    return {"resolved": resolved}
+

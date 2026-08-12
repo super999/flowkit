@@ -18,6 +18,14 @@ function safeSend(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _, reply) => {
+  if (msg.type === 'RESOLVE_REDIRECT') {
+    const { url } = msg;
+    fetch(url)
+      .then((resp) => reply({ status: resp.status, finalUrl: resp.url }))
+      .catch((e) => reply({ error: e.message || 'PAGE_FETCH_FAILED' }));
+    return true; // keep channel open for async reply
+  }
+
   if (msg.type !== 'GET_CAPTCHA') return;
 
   const { requestId, pageAction } = msg;

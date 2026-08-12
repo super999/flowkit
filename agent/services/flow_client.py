@@ -513,38 +513,65 @@ class FlowClient:
             "body": body,
         }, timeout=30)
 
-    async def search_user_projects(self, page_size: int = 10,
-                                    tool_name: str = "PINHOLE") -> list[dict]:
-        """List all user projects from Google Flow.
-
-        Returns list of project dicts with keys:
-          projectId, projectInfo.projectTitle, projectInfo.thumbnailMediaKey,
-          creationTime, agentInfo
-        """
-        import urllib.parse
-        input_data = {"json": {"toolName": tool_name, "pageSize": page_size}}
-        encoded = urllib.parse.quote(json.dumps(input_data))
-        url = f"https://labs.google/fx/api/trpc/project.searchUserProjects?input={encoded}"
-
-        result = await self._send("trpc_request", {
-            "url": url,
-            "method": "GET",
-            "headers": {"content-type": "application/json"},
-        }, timeout=30)
-
-        # Navigate: data.result.data.json.result.projects
+    def _extract_trpc_result(self, result: dict) -> dict:
+        """Safely extract json.result dict from tRPC response (handles list and dict shapes)."""
+        if not isinstance(result, dict):
+            return {}
+        raw_data = result.get("data")
+        if isinstance(raw_data, list) and raw_data:
+            item = raw_data[0]
+        elif isinstance(raw_data, dict):
+            item = raw_data
+        else:
+            return {}
         try:
-            return result["data"]["result"]["data"]["json"]["result"]["projects"]
-        except (KeyError, TypeError) as e:
-            logger.warning("search_user_projects: parse failed: %s", e)
-            return []
+            json_data = item.get("result", {}).get("data", {}).get("json", {})
+            if isinstance(json_data.get("result"), dict):
+                return json_data["result"]
+            return json_data if isinstance(json_data, dict) else {}
+        except (KeyError, TypeError, AttributeError):
+            return {}
+
+    async def search_user_projects(self, limit: int = 50,
+                                    tool_name: str = "PINHOLE") -> list[dict]:
+        """List user projects from Google Flow with nextCursor pagination support."""
+        import urllib.parse
+
+        all_projects = []
+        cursor = None
+
+        while len(all_projects) < limit:
+            chunk_size = min(20, limit - len(all_projects))
+            input_dict = {"toolName": tool_name, "pageSize": chunk_size}
+            if cursor:
+                input_dict["cursor"] = cursor
+
+            input_data = {"json": input_dict}
+            encoded = urllib.parse.quote(json.dumps(input_data))
+            url = f"https://labs.google/fx/api/trpc/project.searchUserProjects?input={encoded}"
+
+            result = await self._send("trpc_request", {
+                "url": url,
+                "method": "GET",
+                "headers": {"content-type": "application/json"},
+            }, timeout=30)
+
+            res_json = self._extract_trpc_result(result)
+            projects = res_json.get("projects", [])
+            if not projects:
+                break
+            all_projects.extend(projects)
+
+            next_cursor = res_json.get("nextCursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return all_projects
 
     async def get_project(self, project_id: str,
                            tool_name: str = "PINHOLE") -> dict:
-        """Get project metadata from Google Flow.
-
-        Returns dict with projectId, projectInfo, agentInfo.
-        """
+        """Get project metadata from Google Flow."""
         import urllib.parse
         input_data = {"json": {"projectId": project_id, "toolName": tool_name}}
         encoded = urllib.parse.quote(json.dumps(input_data))
@@ -556,87 +583,233 @@ class FlowClient:
             "headers": {"content-type": "application/json"},
         }, timeout=30)
 
-        try:
-            return result["data"]["result"]["data"]["json"]["result"]
-        except (KeyError, TypeError):
-            logger.warning("get_project: unexpected response shape: %s",
-                           json.dumps(result)[:300])
-            return {}
+        return self._extract_trpc_result(result)
 
     async def fetch_user_history(self, limit: int = 20,
                                   history_type: str = "FLOW",
-                                  tool_name: str = "PINHOLE") -> list[dict]:
-        """Fetch user media history from Google Flow.
-
-        Args:
-            limit: Max number of workflows to return.
-            history_type: One of MUSIC_FX, IMAGE_FX, VIDEO_FX, MUSIC_FX_DJ,
-                          BACKBONE, FLOW.
-            tool_name: Tool name filter.
-
-        Returns list of workflow dicts, each containing:
-          - media.mediaGenerationId.projectId
-          - media.mediaGenerationId.mediaKey (UUID)
-          - media.mediaGenerationId.mediaType (IMAGE/VIDEO)
-          - media.image.prompt / media.video.prompt
-          - createTime
-        """
+                                  tool_name: str = "PINHOLE",
+                                  page_token: str = None) -> list[dict]:
+        """Fetch user media history from Google Flow. Supports pageToken pagination."""
         import urllib.parse
-        input_data = {"json": {
-            "toolName": tool_name,
-            "limit": limit,
-            "type": history_type,
-        }}
+
+        all_workflows = []
+        current_token = page_token
+        max_fetch = min(limit, 200) # Support up to 200 items (10 pages)
+
+        while len(all_workflows) < max_fetch:
+            chunk_size = min(20, max_fetch - len(all_workflows))
+            inp_data = {
+                "toolName": tool_name,
+                "limit": chunk_size,
+                "type": history_type,
+            }
+            if current_token:
+                inp_data["pageToken"] = current_token
+
+            encoded = urllib.parse.quote(json.dumps({"json": inp_data}))
+            url = f"https://labs.google/fx/api/trpc/media.fetchUserHistory?input={encoded}"
+
+            result = await self._send("trpc_request", {
+                "url": url,
+                "method": "GET",
+                "headers": {"content-type": "application/json"},
+            }, timeout=60)
+
+            res_data = self._extract_trpc_result(result)
+            workflows = res_data.get("userWorkflows", [])
+            if not workflows:
+                break
+            all_workflows.extend(workflows)
+
+            next_token = res_data.get("nextPageToken")
+            # Stop if no next token or if token didn't change (end of pages)
+            if not next_token or next_token == current_token:
+                break
+            current_token = next_token
+
+            # Single page request exit
+            if page_token is None and limit <= 20:
+                break
+
+        return all_workflows
+
+    async def get_project_initial_data(self, project_id: str) -> dict:
+        """Fetch project initial data including projectContents (workflows & media)."""
+        import urllib.parse
+        input_data = {"json": {"projectId": project_id}}
         encoded = urllib.parse.quote(json.dumps(input_data))
-        url = f"https://labs.google/fx/api/trpc/media.fetchUserHistory?input={encoded}"
+        url = f"https://labs.google/fx/api/trpc/flow.projectInitialData?input={encoded}"
 
         result = await self._send("trpc_request", {
             "url": url,
             "method": "GET",
             "headers": {"content-type": "application/json"},
-        }, timeout=60)
+        }, timeout=30)
 
-        try:
-            return result["data"]["result"]["data"]["json"]["result"]["userWorkflows"]
-        except (KeyError, TypeError) as e:
-            logger.warning("fetch_user_history: parse failed: %s", e)
-            return []
+        res_data = self._extract_trpc_result(result)
+        return res_data.get("projectContents", {})
 
     async def fetch_project_media(self, project_id: str,
-                                    limit: int = 50) -> list[dict]:
+                                    limit: int = 150) -> list[dict]:
         """Fetch all media for a specific project.
 
-        Calls fetch_user_history and filters by projectId.
-
-        Returns list of dicts with keys:
-          mediaKey, mediaType, prompt, modelName, aspectRatio,
-          workflowId, createTime
+        1. Primary strategy: Use newly discovered `flow.projectInitialData` for 100% accurate,
+           project-specific media retrieval.
+        2. Fallback strategy: Multi-page `fetch_user_history` filtered by projectId.
         """
-        workflows = await self.fetch_user_history(limit=limit)
+        from agent.db import crud
+
         results = []
-        for wf in workflows:
-            media = wf.get("media", {})
-            gen_id = media.get("mediaGenerationId", {})
-            if gen_id.get("projectId") != project_id:
-                continue
+        seen_keys = set()
 
-            img = media.get("image", {})
-            vid = media.get("video", {})
-            prompt = img.get("prompt", "") or vid.get("prompt", "")
-            model = img.get("modelNameType", "") or vid.get("modelNameType", "")
-            aspect = img.get("aspectRatio", "") or vid.get("aspectRatio", "")
+        # 1. Primary Strategy: Try flow.projectInitialData tRPC endpoint first
+        p_contents = await self.get_project_initial_data(project_id)
+        raw_media = p_contents.get("media", [])
+        raw_workflows = p_contents.get("workflows", [])
 
-            results.append({
-                "mediaKey": gen_id.get("mediaKey", ""),
-                "mediaType": gen_id.get("mediaType", ""),
-                "prompt": prompt,
-                "modelName": model,
-                "aspectRatio": aspect,
-                "workflowId": gen_id.get("workflowId", ""),
-                "createTime": wf.get("createTime", ""),
-            })
+        # Build workflow lookup map by workflowId
+        wf_map = {}
+        for wf in raw_workflows:
+            w_id = wf.get("workflowId") or wf.get("id") or wf.get("name")
+            if w_id:
+                wf_map[w_id] = wf
+
+        if raw_media:
+            for item in raw_media:
+                # mediaKey can be in item.name or mediaGenerationId.mediaKey
+                gen_id = item.get("mediaGenerationId", {})
+                media_key = gen_id.get("mediaKey") or item.get("name", "")
+                if not media_key or media_key in seen_keys:
+                    continue
+                seen_keys.add(media_key)
+
+                w_id = gen_id.get("workflowId", "") or item.get("workflowId", "")
+                wf = wf_map.get(w_id, {})
+
+                img = item.get("image", {}) or wf.get("image", {})
+                vid = item.get("video", {}) or wf.get("video", {})
+                gen_img = img.get("generatedImage", {}) if isinstance(img, dict) else {}
+                gen_vid = vid.get("generatedVideo", {}) if isinstance(vid, dict) else {}
+
+                prompt = (
+                    gen_img.get("prompt", "") or gen_vid.get("prompt", "") or
+                    img.get("prompt", "") or vid.get("prompt", "") or
+                    wf.get("prompt", "") or wf.get("userPrompt", "")
+                )
+                model = (
+                    gen_img.get("modelNameType", "") or gen_vid.get("modelNameType", "") or
+                    img.get("modelNameType", "") or vid.get("modelNameType", "") or
+                    wf.get("modelName", "") or wf.get("model", "")
+                )
+                aspect = (
+                    gen_img.get("aspectRatio", "") or gen_vid.get("aspectRatio", "") or
+                    img.get("aspectRatio", "") or vid.get("aspectRatio", "") or
+                    wf.get("aspectRatio", "")
+                )
+                meta = item.get("mediaMetadata", {}) or item.get("metadata", {}) if isinstance(item, dict) else {}
+                wf_meta = wf.get("metadata", {}) or wf.get("mediaMetadata", {}) if isinstance(wf, dict) else {}
+                create_time = (
+                    item.get("createTime", "") or item.get("creationTime", "") or item.get("createdAt", "") or
+                    meta.get("createTime", "") or meta.get("creationTime", "") or meta.get("createdAt", "") or
+                    wf.get("createTime", "") or wf.get("creationTime", "") or wf.get("createdAt", "") or
+                    wf_meta.get("createTime", "") or wf_meta.get("creationTime", "") or wf_meta.get("createdAt", "")
+                )
+
+                results.append({
+                    "mediaKey": media_key,
+                    "mediaType": gen_id.get("mediaType") or ("VIDEO" if vid else "IMAGE"),
+                    "prompt": prompt,
+                    "modelName": model,
+                    "aspectRatio": aspect,
+                    "workflowId": w_id,
+                    "createTime": create_time,
+                })
+
+        # 2. Fallback Strategy: If projectInitialData returned nothing, query fetch_user_history
+        if not results:
+            workflows = await self.fetch_user_history(limit=limit)
+            for wf in workflows:
+                media = wf.get("media", {})
+                gen_id = media.get("mediaGenerationId", {})
+                if gen_id.get("projectId") != project_id:
+                    continue
+
+                media_key = gen_id.get("mediaKey", "")
+                if not media_key or media_key in seen_keys:
+                    continue
+                seen_keys.add(media_key)
+
+                img = media.get("image", {})
+                vid = media.get("video", {})
+                gen_img = img.get("generatedImage", {}) if isinstance(img, dict) else {}
+                gen_vid = vid.get("generatedVideo", {}) if isinstance(vid, dict) else {}
+
+                prompt = gen_img.get("prompt", "") or gen_vid.get("prompt", "") or img.get("prompt", "") or vid.get("prompt", "")
+                model = gen_img.get("modelNameType", "") or gen_vid.get("modelNameType", "") or img.get("modelNameType", "") or vid.get("modelNameType", "")
+                aspect = gen_img.get("aspectRatio", "") or gen_vid.get("aspectRatio", "") or img.get("aspectRatio", "") or vid.get("aspectRatio", "")
+
+                wf_meta = wf.get("metadata", {}) or wf.get("mediaMetadata", {}) if isinstance(wf, dict) else {}
+                create_time = (
+                    wf.get("createTime", "") or wf.get("creationTime", "") or wf.get("createdAt", "") or
+                    wf_meta.get("createTime", "") or wf_meta.get("creationTime", "") or wf_meta.get("createdAt", "")
+                )
+
+                results.append({
+                    "mediaKey": media_key,
+                    "mediaType": gen_id.get("mediaType", "IMAGE"),
+                    "prompt": prompt,
+                    "modelName": model,
+                    "aspectRatio": aspect,
+                    "workflowId": gen_id.get("workflowId", ""),
+                    "createTime": create_time,
+                })
+
+        # 3. Merge local flow_media DB entries ONLY IF they explicitly belong to this project
+        try:
+            db_rows = await crud.list_flow_media(limit=500)
+            for row in db_rows:
+                row_pid = row.get("project_id", "")
+                if row_pid and row_pid != project_id:
+                    continue
+
+                mk = row.get("media_id", "")
+                if mk and mk not in seen_keys and row_pid == project_id:
+                    seen_keys.add(mk)
+                    results.append({
+                        "mediaKey": mk,
+                        "mediaType": row.get("media_type", "IMAGE"),
+                        "prompt": row.get("prompt", ""),
+                        "modelName": row.get("model_name", ""),
+                        "aspectRatio": row.get("aspect_ratio", ""),
+                        "workflowId": "",
+                        "createTime": row.get("created_at", "") or row.get("updated_at", ""),
+                        "url": row.get("url", ""),
+                    })
+        except Exception as e:
+            logger.warning("fetch_project_media: failed to query local flow_media: %s", e)
+
+        # Sort results chronologically descending (newest first), matching Google Flow's layout
+        results.sort(key=lambda x: x.get("createTime") or "", reverse=True)
 
         return results
+
+    async def resolve_media_url(self, media_id: str, timeout: int = 15) -> str:
+        """Resolve a mediaKey/media_id to its signed CDN URL via extension."""
+        url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}"
+        res = await self._send("fetch_redirect", {"url": url}, timeout=timeout)
+        if isinstance(res, dict) and res.get("finalUrl"):
+            return res["finalUrl"]
+        return ""
+
+    async def resolve_media_urls(self, media_ids: list[str]) -> dict[str, str]:
+        """Batch resolve multiple mediaKeys/media_ids to signed CDN URLs."""
+        tasks = [self.resolve_media_url(mid) for mid in media_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        resolved = {}
+        for mid, res in zip(media_ids, results):
+            if isinstance(res, str) and res:
+                resolved[mid] = res
+        return resolved
 
     async def generate_images(self, prompt: str, project_id: str,
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
