@@ -18,6 +18,7 @@ import GuidePage from './pages/GuidePage'
 
 
 
+
 const BREADCRUMB_TAB_KEY: Record<string, TranslationKey> = {
   overview: 'app.breadcrumbTab.overview',
   characters: 'app.breadcrumbTab.characters',
@@ -127,6 +128,16 @@ const NAV_ITEMS: NavItem[] = [
       { to: '/settings/llm-test', label: 'LLM 接口测试', icon: <FlaskConical size={11} /> },
     ],
   },
+=======
+import Txt2ImgPage from './pages/Txt2ImgPage'
+
+const NAV = [
+  { to: '/', icon: LayoutDashboard, label: 'Dashboard', exact: true },
+  { to: '/projects', icon: FolderOpen, label: 'Projects', exact: false },
+  { to: '/txt2img', icon: Image, label: 'Txt2Img', exact: false },
+  { to: '/logs', icon: ScrollText, label: 'Logs', exact: false },
+  { to: '/gallery', icon: Film, label: 'Gallery', exact: false },
+>>>>>>> origin/main
 ]
 
 function SidebarNavItem({ item, depth }: { item: NavItem; depth: number }) {
@@ -296,6 +307,7 @@ function Layout() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/settings/llm" element={<SettingsPage />} />
             <Route path="/settings/llm-test" element={<LLMTestPage />} />
+
           </Routes>
         </main>
       </div>

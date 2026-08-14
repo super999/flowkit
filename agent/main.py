@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
     except (NotImplementedError, AttributeError):
         pass
 
+
     # Start background tasks
     ws_task = asyncio.create_task(run_ws_server())
     worker_task = asyncio.create_task(controller.start())

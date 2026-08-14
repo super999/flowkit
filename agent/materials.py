@@ -1,12 +1,20 @@
 """Material registry — built-in and custom visual styles for image generation."""
 
 _BUILTIN_IDS: frozenset[str] = frozenset({
-    "realistic", "3d_pixar", "anime", "ghibli", "stop_motion", "minecraft",
+    "raw", "realistic", "3d_pixar", "anime", "ghibli", "stop_motion", "minecraft",
     "oil_painting", "watercolor", "comic_book", "cyberpunk", "claymation",
     "lego", "retro_vhs",
 })
 
 MATERIALS: dict[str, dict] = {
+    "raw": {
+        "id": "raw",
+        "name": "Raw (No Style Modification)",
+        "style_instruction": "",
+        "negative_prompt": "",
+        "scene_prefix": "",
+        "lighting": "",
+    },
     "realistic": {
         "id": "realistic",
         "name": "Photorealistic",
