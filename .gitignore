@@ -25,3 +25,5 @@ ds-bundle/
 .design-sync/node_modules
 extension/_metadata/
 dashboard/dist/
+*.log
+.flowkit.pid
