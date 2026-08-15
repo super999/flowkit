@@ -7,6 +7,7 @@ export interface MediaDetailInfo {
   src: string
   mediaId?: string | null
   prompt?: string | null
+  translatedPrompt?: string | null
   aspect?: string | null
   model?: string | null
   durationMs?: number | null
@@ -237,6 +238,7 @@ export default function ImageDetailModal({
 }: ImageDetailModalProps) {
   const [copiedPrompt, setCopiedPrompt] = useState(false)
   const [copiedMediaId, setCopiedMediaId] = useState(false)
+  const [promptTab, setPromptTab] = useState<'original' | 'translated'>('original')
   const [currentSrc, setCurrentSrc] = useState<string | null | undefined>(info.src)
   const [cachedLocally, setCachedLocally] = useState<boolean>(() => {
     return Boolean(
@@ -246,6 +248,11 @@ export default function ImageDetailModal({
   })
   const [caching, setCaching] = useState(false)
   const [cacheError, setCacheError] = useState<string | null>(null)
+
+  // Reset prompt tab when media changes
+  useEffect(() => {
+    setPromptTab('original')
+  }, [info.mediaId, info.prompt, info.translatedPrompt])
 
   // Media dimensions (width x height) & file size in bytes
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null)
@@ -550,23 +557,65 @@ export default function ImageDetailModal({
             </button>
           </div>
 
-          {/* Prompt / Name Section */}
-          {info.prompt && (
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-zinc-300">画面提示词 / 名称</span>
-                <button
-                  onClick={() => copyText(info.prompt!, 'prompt')}
-                  className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 hover:border-cyan-500 text-zinc-400 hover:text-cyan-300 transition-colors"
-                >
-                  {copiedPrompt ? '✓ 已复制' : '📋 复制'}
-                </button>
+          {/* Prompt Section (Supports Dual Prompt Tabs) */}
+          {(() => {
+            const hasDualPrompts = Boolean(
+              info.prompt &&
+              info.translatedPrompt &&
+              info.translatedPrompt.trim() !== '' &&
+              info.translatedPrompt.trim() !== info.prompt.trim()
+            )
+            const activePrompt = (promptTab === 'translated' && info.translatedPrompt)
+              ? info.translatedPrompt
+              : (info.prompt || info.title || '')
+
+            if (!activePrompt && !info.translatedPrompt && !info.prompt) return null
+
+            return (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  {hasDualPrompts ? (
+                    <div className="flex items-center gap-1 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
+                      <button
+                        onClick={() => setPromptTab('original')}
+                        className={`text-[11px] px-2 py-0.5 rounded-md font-medium transition-all ${
+                          promptTab === 'original'
+                            ? 'bg-cyan-500/20 text-cyan-300 font-semibold shadow-sm border border-cyan-500/30'
+                            : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                        title="查看原始输入的提示词 (用户输入)"
+                      >
+                        🇨🇳 原始提示词
+                      </button>
+                      <button
+                        onClick={() => setPromptTab('translated')}
+                        className={`text-[11px] px-2 py-0.5 rounded-md font-medium transition-all ${
+                          promptTab === 'translated'
+                            ? 'bg-blue-500/20 text-blue-300 font-semibold shadow-sm border border-blue-500/30'
+                            : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                        title="查看 Google Flow 大模型翻译/底层接收的英文提示词"
+                      >
+                        🌐 英文/底层词
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="font-semibold text-zinc-300">画面提示词 / 名称</span>
+                  )}
+                  <button
+                    onClick={() => copyText(activePrompt, 'prompt')}
+                    className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 hover:border-cyan-500 text-zinc-400 hover:text-cyan-300 transition-colors shrink-0"
+                    title="一键复制当前显示的提示词"
+                  >
+                    {copiedPrompt ? '✓ 已复制' : '📋 复制'}
+                  </button>
+                </div>
+                <div className="p-2.5 rounded-lg bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-300 leading-relaxed max-h-40 overflow-y-auto select-text whitespace-pre-wrap font-sans">
+                  {activePrompt}
+                </div>
               </div>
-              <div className="p-2.5 rounded-lg bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-300 leading-relaxed max-h-40 overflow-y-auto select-text whitespace-pre-wrap">
-                {info.prompt}
-              </div>
-            </div>
-          )}
+            )
+          })()}
 
           {/* Metadata Key-Values */}
           <div className="flex flex-col gap-2.5 text-xs">

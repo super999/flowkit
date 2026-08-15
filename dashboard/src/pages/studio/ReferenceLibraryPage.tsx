@@ -15,6 +15,7 @@ interface MediaLibraryItem {
   project_title?: string | null
   name?: string | null
   prompt?: string | null
+  translated_prompt?: string | null
   model_name?: string | null
   aspect_ratio?: string | null
   media_type: string
@@ -564,6 +565,7 @@ export default function ReferenceLibraryPage() {
                     src: displayThumb,
                     mediaId: item.media_id,
                     prompt: item.prompt || item.name,
+                    translatedPrompt: item.translated_prompt,
                     model: item.model_name,
                     aspect: item.aspect_ratio,
                     createdAt: item.created_at,

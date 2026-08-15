@@ -418,6 +418,7 @@ async def upsert_media_library_item(
     project_title: str = None,
     name: str = None,
     prompt: str = None,
+    translated_prompt: str = None,
     model_name: str = None,
     aspect_ratio: str = None,
     media_type: str = "image",
@@ -426,6 +427,7 @@ async def upsert_media_library_item(
     local_path: str = None,
     is_cached: int = 0,
     source: str = "flow",
+    created_at: str = None,
 ) -> dict | None:
     if not media_id:
         return None
@@ -434,10 +436,10 @@ async def upsert_media_library_item(
     async with _db_lock:
         await db.execute(
             """INSERT INTO media_library (
-                media_id, project_id, project_title, name, prompt, model_name,
+                media_id, project_id, project_title, name, prompt, translated_prompt, model_name,
                 aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
                 created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(media_id) DO UPDATE SET
                 project_id = COALESCE(excluded.project_id, media_library.project_id),
                 project_title = COALESCE(excluded.project_title, media_library.project_title),
@@ -453,6 +455,7 @@ async def upsert_media_library_item(
                     THEN media_library.prompt
                     ELSE COALESCE(excluded.prompt, media_library.prompt)
                 END,
+                translated_prompt = COALESCE(excluded.translated_prompt, media_library.translated_prompt),
                 model_name = COALESCE(excluded.model_name, media_library.model_name),
                 aspect_ratio = COALESCE(excluded.aspect_ratio, media_library.aspect_ratio),
                 media_type = COALESCE(excluded.media_type, media_library.media_type),
@@ -464,9 +467,9 @@ async def upsert_media_library_item(
                 updated_at = excluded.updated_at
             """,
             (
-                media_id, project_id, project_title, name, prompt, model_name,
+                media_id, project_id, project_title, name, prompt, translated_prompt, model_name,
                 aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
-                now, now
+                created_at or now, now
             )
         )
         await db.commit()
@@ -486,10 +489,10 @@ async def batch_upsert_media_library(items: list[dict]) -> int:
                 continue
             await db.execute(
                 """INSERT INTO media_library (
-                    media_id, project_id, project_title, name, prompt, model_name,
+                    media_id, project_id, project_title, name, prompt, translated_prompt, model_name,
                     aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
                     created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(media_id) DO UPDATE SET
                     project_id = COALESCE(excluded.project_id, media_library.project_id),
                     project_title = COALESCE(excluded.project_title, media_library.project_title),
@@ -505,6 +508,7 @@ async def batch_upsert_media_library(items: list[dict]) -> int:
                         THEN media_library.prompt
                         ELSE COALESCE(excluded.prompt, media_library.prompt)
                     END,
+                    translated_prompt = COALESCE(excluded.translated_prompt, media_library.translated_prompt),
                     model_name = COALESCE(excluded.model_name, media_library.model_name),
                     aspect_ratio = COALESCE(excluded.aspect_ratio, media_library.aspect_ratio),
                     media_type = COALESCE(excluded.media_type, media_library.media_type),
@@ -521,6 +525,7 @@ async def batch_upsert_media_library(items: list[dict]) -> int:
                     item.get("project_title"),
                     item.get("name"),
                     item.get("prompt"),
+                    item.get("translated_prompt"),
                     item.get("model_name") or item.get("modelName"),
                     item.get("aspect_ratio") or item.get("aspectRatio"),
                     item.get("media_type") or item.get("mediaType") or "image",
@@ -559,12 +564,12 @@ async def list_media_library(
         conditions.append("is_cached = ?")
         params.append(int(is_cached))
     if media_type:
-        conditions.append("media_type = ?")
+        conditions.append("LOWER(media_type) = LOWER(?)")
         params.append(media_type)
     if search:
-        conditions.append("(name LIKE ? OR prompt LIKE ? OR project_title LIKE ?)")
+        conditions.append("(name LIKE ? OR prompt LIKE ? OR translated_prompt LIKE ? OR project_title LIKE ?)")
         term = f"%{search}%"
-        params.extend([term, term, term])
+        params.extend([term, term, term, term])
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

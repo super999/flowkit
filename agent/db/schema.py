@@ -195,21 +195,22 @@ CREATE TABLE IF NOT EXISTS flow_media (
 
 -- Consolidated Media Library (Single source of truth for all Flow & local reference media)
 CREATE TABLE IF NOT EXISTS media_library (
-    media_id       TEXT PRIMARY KEY,
-    project_id     TEXT,
-    project_title  TEXT,
-    name           TEXT,
-    prompt         TEXT,
-    model_name     TEXT,
-    aspect_ratio   TEXT,
-    media_type     TEXT DEFAULT 'image',
-    url            TEXT,
-    thumb          TEXT,
-    local_path     TEXT,
-    is_cached      INTEGER DEFAULT 0,
-    source         TEXT DEFAULT 'flow',
-    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    media_id          TEXT PRIMARY KEY,
+    project_id        TEXT,
+    project_title     TEXT,
+    name              TEXT,
+    prompt            TEXT,
+    translated_prompt TEXT,
+    model_name        TEXT,
+    aspect_ratio      TEXT,
+    media_type        TEXT DEFAULT 'image',
+    url               TEXT,
+    thumb             TEXT,
+    local_path        TEXT,
+    is_cached         INTEGER DEFAULT 0,
+    source            TEXT DEFAULT 'flow',
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_media_lib_proj ON media_library(project_id);
 CREATE INDEX IF NOT EXISTS idx_media_lib_cached ON media_library(is_cached);
@@ -422,6 +423,13 @@ SELECT media_id, project_id, name, thumb, 'library', created_at, created_at FROM
 INSERT OR IGNORE INTO media_library (media_id, media_type, url, source, created_at, updated_at)
 SELECT media_id, media_type, url, 'flow', created_at, updated_at FROM flow_media WHERE media_id IS NOT NULL AND media_id != ''
 """)
+
+        # Migration: ensure translated_prompt column exists in media_library
+        cursor = await db.execute("PRAGMA table_info(media_library)")
+        media_cols = {row[1] for row in await cursor.fetchall()}
+        if "translated_prompt" not in media_cols:
+            await db.execute("ALTER TABLE media_library ADD COLUMN translated_prompt TEXT")
+            logger.info("Migrated: added translated_prompt column to media_library table")
 
         # Sync existing local cache files on disk into media_library
         from agent.config import MEDIA_CACHE_DIR

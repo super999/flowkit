@@ -133,16 +133,22 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
 
         logger.info("Syncing media for %d Flow projects in parallel...", len(projects_to_sync))
 
-        # Pre-load all local user prompts from refgen_result & scene
+        # Pre-load all local user prompts from refgen_result, character & scene
         local_user_prompts = {}
         try:
             db = await crud.get_db()
             cur = await db.execute("SELECT media_id, prompt FROM refgen_result WHERE prompt IS NOT NULL AND prompt != ''")
             for r in await cur.fetchall():
                 local_user_prompts[r["media_id"]] = r["prompt"]
-            cur2 = await db.execute("SELECT image_media_id, prompt FROM scene WHERE image_media_id IS NOT NULL AND prompt IS NOT NULL AND prompt != ''")
-            for r in await cur2.fetchall():
-                local_user_prompts[r["image_media_id"]] = r["prompt"]
+            cur_char = await db.execute("SELECT media_id, description, image_prompt, name FROM character WHERE media_id IS NOT NULL AND media_id != ''")
+            for r in await cur_char.fetchall():
+                local_user_prompts[r["media_id"]] = r["image_prompt"] or r["description"] or r["name"]
+            cur_v = await db.execute("SELECT vertical_image_media_id, prompt FROM scene WHERE vertical_image_media_id IS NOT NULL AND prompt IS NOT NULL AND prompt != ''")
+            for r in await cur_v.fetchall():
+                local_user_prompts[r["vertical_image_media_id"]] = r["prompt"]
+            cur_h = await db.execute("SELECT horizontal_image_media_id, prompt FROM scene WHERE horizontal_image_media_id IS NOT NULL AND prompt IS NOT NULL AND prompt != ''")
+            for r in await cur_h.fetchall():
+                local_user_prompts[r["horizontal_image_media_id"]] = r["prompt"]
         except Exception as e:
             logger.debug("Failed to pre-load local user prompts: %s", e)
 
@@ -176,8 +182,19 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
                         is_cached = 1 if (cached_p.exists() and cached_p.stat().st_size > 0) else 0
                         local_path = f"/output/_cache/{mid}.{ext}" if is_cached else None
 
-                        # Prioritize user original prompt if exists locally
-                        prompt_text = local_user_prompts.get(mid) or _clean_flow_prompt(item.get("prompt") or "")
+                        raw_flow_prompt = item.get("prompt") or ""
+                        cleaned_flow_prompt = _clean_flow_prompt(raw_flow_prompt)
+                        user_orig_prompt = local_user_prompts.get(mid)
+
+                        # prompt: original user prompt (or cleaned flow prompt)
+                        # translated_prompt: underlying translated english prompt if different
+                        if user_orig_prompt and user_orig_prompt != cleaned_flow_prompt:
+                            prompt_text = user_orig_prompt
+                            translated_prompt_text = cleaned_flow_prompt
+                        else:
+                            prompt_text = cleaned_flow_prompt
+                            translated_prompt_text = None
+
                         model = item.get("modelName") or ""
                         aspect = item.get("aspectRatio") or ""
                         thumb = item.get("url") or ""
@@ -188,6 +205,7 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
                             "project_title": p_title,
                             "name": prompt_text[:50] if prompt_text else f"Flow {media_type} ({mid[:6]})",
                             "prompt": prompt_text,
+                            "translated_prompt": translated_prompt_text,
                             "model_name": model,
                             "aspect_ratio": aspect,
                             "media_type": media_type,
