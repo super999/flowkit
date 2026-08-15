@@ -217,6 +217,55 @@ export default function ImageStudioPage() {
   const [scenePageSize] = useState(8)
   const [jumpPage, setJumpPage] = useState('')
 
+  // RefGen results pagination (2 columns grid, 6 cards per page)
+  const [refgenPage, setRefgenPage] = useState(1)
+  const [refgenPageSize] = useState(6)
+  const [refgenJumpPage, setRefgenJumpPage] = useState('')
+  const totalRefgenPages = Math.max(1, Math.ceil(refgenResults.length / refgenPageSize))
+  const safeRefgenPage = Math.min(refgenPage, totalRefgenPages)
+  const pageRefgenResults = refgenResults.slice((safeRefgenPage - 1) * refgenPageSize, safeRefgenPage * refgenPageSize)
+
+  // Character manual refresh state
+  const [refreshingCharId, setRefreshingCharId] = useState<string | null>(null)
+  const [refreshingAllChars, setRefreshingAllChars] = useState(false)
+
+  const handleRefreshCharacter = async (char: Character) => {
+    const mid = char.media_id
+    if (!mid) {
+      alert('该角色尚未生成 media_id')
+      return
+    }
+    setRefreshingCharId(char.id)
+    try {
+      await fetchAPI('/api/flow/media/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ media_ids: [mid] }),
+      }).catch(() => null)
+      await fetch(`/api/flow/media/proxy?media_id=${mid}&t=${Date.now()}`).catch(() => {})
+      if (selectedProjectId) await loadProjectAssets(selectedProjectId)
+    } finally {
+      setRefreshingCharId(null)
+    }
+  }
+
+  const handleRefreshAllCharacters = async () => {
+    if (!characters.length) return
+    setRefreshingAllChars(true)
+    try {
+      const mids = characters.map(c => c.media_id).filter(Boolean) as string[]
+      if (mids.length > 0) {
+        await fetchAPI('/api/flow/media/resolve', {
+          method: 'POST',
+          body: JSON.stringify({ media_ids: mids }),
+        }).catch(() => null)
+        await Promise.all(mids.map(mid => fetch(`/api/flow/media/proxy?media_id=${mid}&t=${Date.now()}`).catch(() => {})))
+      }
+      if (selectedProjectId) await loadProjectAssets(selectedProjectId)
+    } finally {
+      setRefreshingAllChars(false)
+    }
+  }
+
   // Load project list and initial project
   const loadProjects = async () => {
     try {
@@ -1464,44 +1513,114 @@ export default function ImageStudioPage() {
                       暂无生成结果。左侧选择参考图 + 填写提示词，点击「用参考图生成新画面」！
                     </div>
                   ) : (
-                    <div className="grid grid-cols-2 gap-3">
-                      {refgenResults.map((r, idx) => {
-                        const dlState = downloading?.id === r.id ? downloading.res : null
-                        return (
-                          <div key={r.id} className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                            <div className="flex items-center justify-between">
-                              <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                                {r.time}{r.durationMs ? ` · ⏱ 生成 ${(r.durationMs / 1000).toFixed(1)}s` : ''}
-                              </span>
-                              <div className="flex gap-0.5 items-center">
-                                {(['1K', '2K', '4K'] as const).map(res => (
-                                  <button
-                                    key={res}
-                                    disabled={dlState !== null}
-                                    onClick={() => downloadAtResolution(r.url, r.mediaId, `refgen_${r.id.slice(0, 8)}`, res, r.id)}
-                                    className="text-[10px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
-                                    style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}
-                                    title={`下载 ${res} 分辨率`}
-                                  >
-                                    {dlState === res ? '⏳' : `⬇️${res}`}
-                                  </button>
-                                ))}
+                    <>
+                      <div className="grid grid-cols-2 gap-3">
+                        {pageRefgenResults.map((r, idx) => {
+                          const globalIdx = idx + (safeRefgenPage - 1) * refgenPageSize
+                          const dlState = downloading?.id === r.id ? downloading.res : null
+                          return (
+                            <div key={r.id} className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+                                  {r.time}{r.durationMs ? ` · ⏱ 生成 ${(r.durationMs / 1000).toFixed(1)}s` : ''}
+                                </span>
+                                <div className="flex gap-0.5 items-center">
+                                  {(['1K', '2K', '4K'] as const).map(res => (
+                                    <button
+                                      key={res}
+                                      disabled={dlState !== null}
+                                      onClick={() => downloadAtResolution(r.url, r.mediaId, `refgen_${r.id.slice(0, 8)}`, res, r.id)}
+                                      className="text-[10px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
+                                      style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}
+                                      title={`下载 ${res} 分辨率`}
+                                    >
+                                      {dlState === res ? '⏳' : `⬇️${res}`}
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
+                              <div
+                                className="w-full rounded overflow-hidden bg-black flex items-center justify-center border"
+                                style={{
+                                  borderColor: 'var(--border)',
+                                  aspectRatio: ASPECT_CSS[r.aspect || ''] || '16 / 9',
+                                }}
+                              >
+                                <CachedImage mediaId={r.mediaId} src={r.url} alt={`refgen-${globalIdx}`} className="w-full h-full object-cover" />
+                              </div>
+                              <span className="text-[11px] line-clamp-2 leading-relaxed" style={{ color: 'var(--text)' }}>{r.prompt}</span>
                             </div>
-                            <div
-                              className="w-full rounded overflow-hidden bg-black flex items-center justify-center border"
-                              style={{
-                                borderColor: 'var(--border)',
-                                aspectRatio: ASPECT_CSS[r.aspect || ''] || '16 / 9',
-                              }}
+                          )
+                        })}
+                      </div>
+
+                      {/* RefGen Pagination */}
+                      {totalRefgenPages > 1 && (
+                        <div className="flex items-center justify-between pt-2 border-t text-xs mt-1" style={{ borderColor: 'var(--border)' }}>
+                          <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
+                            共 {refgenResults.length} 条 · 第 {safeRefgenPage} / {totalRefgenPages} 页
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 text-[11px] px-2"
+                              disabled={safeRefgenPage <= 1}
+                              onClick={() => setRefgenPage(p => Math.max(1, p - 1))}
                             >
-                              <CachedImage mediaId={r.mediaId} src={r.url} alt={`refgen-${idx}`} className="w-full h-full object-cover" />
+                              上一页
+                            </Button>
+                            <span className="px-1 text-[11px] font-mono" style={{ color: 'var(--accent)' }}>
+                              {safeRefgenPage} / {totalRefgenPages}
+                            </span>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 text-[11px] px-2"
+                              disabled={safeRefgenPage >= totalRefgenPages}
+                              onClick={() => setRefgenPage(p => Math.min(totalRefgenPages, p + 1))}
+                            >
+                              下一页
+                            </Button>
+                            <div className="flex items-center gap-1 ml-1.5">
+                              <input
+                                type="number"
+                                min={1}
+                                max={totalRefgenPages}
+                                value={refgenJumpPage}
+                                onChange={e => setRefgenJumpPage(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') {
+                                    const p = parseInt(refgenJumpPage, 10)
+                                    if (p >= 1 && p <= totalRefgenPages) {
+                                      setRefgenPage(p)
+                                      setRefgenJumpPage('')
+                                    }
+                                  }
+                                }}
+                                placeholder="页码"
+                                className="w-11 h-6 text-[10px] text-center rounded border outline-none bg-transparent"
+                                style={{ borderColor: 'var(--border)' }}
+                              />
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 text-[10px] px-1.5"
+                                onClick={() => {
+                                  const p = parseInt(refgenJumpPage, 10)
+                                  if (p >= 1 && p <= totalRefgenPages) {
+                                    setRefgenPage(p)
+                                    setRefgenJumpPage('')
+                                  }
+                                }}
+                              >
+                                跳转
+                              </Button>
                             </div>
-                            <span className="text-[11px] line-clamp-2 leading-relaxed" style={{ color: 'var(--text)' }}>{r.prompt}</span>
                           </div>
-                        )
-                      })}
-                    </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -1509,9 +1628,21 @@ export default function ImageStudioPage() {
               {/* Entities Reference Images Section */}
               {activeTab !== 'refgen' && characters.length > 0 && (
                 <div className="flex flex-col gap-2">
-                  <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: 'var(--accent)' }}>
-                    <span>👥 角色/实体参考图 ({characters.length})</span>
-                  </span>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: 'var(--accent)' }}>
+                      <span>👥 角色/实体参考图 ({characters.length})</span>
+                    </span>
+                    <button
+                      onClick={handleRefreshAllCharacters}
+                      disabled={refreshingAllChars || characters.length === 0}
+                      className="text-[10px] px-2 py-0.5 rounded border hover:border-accent text-accent transition-colors disabled:opacity-50 flex items-center gap-1"
+                      style={{ borderColor: 'var(--border)' }}
+                      title="批量重新拉取并本地缓存所有实体的参考图"
+                    >
+                      <span>{refreshingAllChars ? '⏳ 正在刷新...' : '🔄 刷新全部参考图'}</span>
+                    </button>
+                  </div>
+
                   <div className="grid grid-cols-3 gap-3">
                     {characters.map(c => (
                       <div key={c.id} className="p-2.5 rounded-lg border flex flex-col gap-2 relative group" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
@@ -1519,6 +1650,16 @@ export default function ImageStudioPage() {
                             <span className="text-xs font-semibold truncate">{c.name}</span>
                             <div className="flex items-center gap-1">
                               <Badge variant="outline" className="text-[9px]">{c.entity_type || 'char'}</Badge>
+                              {c.media_id && (
+                                <button
+                                  onClick={() => handleRefreshCharacter(c)}
+                                  disabled={refreshingCharId === c.id}
+                                  className="text-[11px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
+                                  title="重新拉取并更新此参考图"
+                                >
+                                  {refreshingCharId === c.id ? '⏳' : '🔄'}
+                                </button>
+                              )}
                               {c.reference_image_url && (
                                 <button
                                   onClick={() => downloadImage(c.reference_image_url!, `ref_${c.name}.jpg`)}
@@ -1538,26 +1679,14 @@ export default function ImageStudioPage() {
                             </div>
                           </div>
                         <div className="w-full aspect-square rounded overflow-hidden bg-black flex items-center justify-center border relative" style={{ borderColor: 'var(--border)' }}>
-                          {c.reference_image_url ? (
+                          {c.reference_image_url || c.media_id ? (
                             <CachedImage
                               mediaId={c.media_id}
                               src={c.reference_image_url}
                               alt={c.name}
                               className="w-full h-full object-cover rounded cursor-pointer group-hover:scale-105 transition-transform"
-                              onClick={() => window.open(c.reference_image_url!, '_blank')}
-                              onError={(e) => {
-                                (e.target as HTMLElement).style.display = 'none'
-                                const parent = (e.target as HTMLElement).parentElement
-                                if (parent) {
-                                  parent.innerHTML = `<div class="p-2 text-center flex flex-col items-center justify-center h-full gap-1"><span class="text-[10px] text-red-400 font-semibold">⚠️ 链接已失效</span><span class="text-[9px] text-muted">点击右上角🗑️可删除</span></div>`
-                                }
-                              }}
+                              onClick={() => c.reference_image_url && window.open(c.reference_image_url, '_blank')}
                             />
-                          ) : c.media_id ? (
-                            <div className="flex flex-col items-center p-2 text-center">
-                              <span className="text-xs font-semibold" style={{ color: 'var(--green)' }}>✓ 已生成 MediaID</span>
-                              <span className="text-[9px] truncate w-full mono" style={{ color: 'var(--muted)' }}>{c.media_id.slice(0, 8)}</span>
-                            </div>
                           ) : (
                             <div className="flex flex-col items-center p-2 text-center gap-1">
                               <span className="text-[10px]" style={{ color: 'var(--yellow)' }}>⚠️ 未生成画面</span>

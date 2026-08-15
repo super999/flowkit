@@ -259,7 +259,17 @@ async def unlink_character(pid: str, cid: str):
 @router.get("/{pid}/characters", response_model=list[Character])
 async def get_characters(pid: str):
     repo = _get_repo()
-    return await repo.get_project_characters(pid)
+    chars = await repo.get_project_characters(pid)
+    from agent.services.media_cache import get_cached_image_url, trigger_background_cache
+    for c in chars:
+        mid = c.media_id or c.reference_image_media_id
+        if mid:
+            cached_url = get_cached_image_url(mid)
+            if cached_url:
+                c.reference_image_url = cached_url
+            elif c.reference_image_url:
+                trigger_background_cache(mid, c.reference_image_url)
+    return chars
 
 
 @router.get("/{pid}/media")
