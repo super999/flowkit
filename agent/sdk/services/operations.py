@@ -313,7 +313,10 @@ class OperationService:
     async def generate_scene_image(self, scene: dict, orientation: str) -> dict:
         """Generate a scene image with reference imageInputs."""
         project = await crud.get_project(scene.get("_project_id", "0"))
-        aspect = "IMAGE_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
+        if orientation and orientation.startswith("IMAGE_ASPECT_RATIO_"):
+            aspect = orientation
+        else:
+            aspect = "IMAGE_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
         prompt = scene.get("image_prompt") or scene.get("prompt", "")
         # CONTINUATION scenes: enrich prompt with transformation context
         if scene.get("parent_scene_id") and not scene.get("image_prompt"):
@@ -369,7 +372,10 @@ class OperationService:
         [base_image, char_A, char_B, ...] — helps Google Flow detect characters.
         """
         project = await crud.get_project(scene.get("_project_id", "0"))
-        aspect = "IMAGE_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
+        if orientation and orientation.startswith("IMAGE_ASPECT_RATIO_"):
+            aspect = orientation
+        else:
+            aspect = "IMAGE_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
         tier = project.get("user_paygate_tier", "PAYGATE_TIER_ONE") if project else "PAYGATE_TIER_ONE"
         pid = scene.get("_project_id", "0")
 

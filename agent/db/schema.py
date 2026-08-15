@@ -192,12 +192,36 @@ CREATE TABLE IF NOT EXISTS flow_media (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- Consolidated Media Library (Single source of truth for all Flow & local reference media)
+CREATE TABLE IF NOT EXISTS media_library (
+    media_id       TEXT PRIMARY KEY,
+    project_id     TEXT,
+    project_title  TEXT,
+    name           TEXT,
+    prompt         TEXT,
+    model_name     TEXT,
+    aspect_ratio   TEXT,
+    media_type     TEXT DEFAULT 'image',
+    url            TEXT,
+    thumb          TEXT,
+    local_path     TEXT,
+    is_cached      INTEGER DEFAULT 0,
+    source         TEXT DEFAULT 'flow',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_media_lib_proj ON media_library(project_id);
+CREATE INDEX IF NOT EXISTS idx_media_lib_cached ON media_library(is_cached);
+CREATE INDEX IF NOT EXISTS idx_media_lib_type ON media_library(media_type);
+CREATE INDEX IF NOT EXISTS idx_media_lib_created ON media_library(created_at);
 """
 
 
 async def init_db():
     """Initialize database with schema and run migrations."""
     async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("PRAGMA busy_timeout=10000")
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(SCHEMA)
@@ -354,6 +378,63 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
     negative_prompt TEXT, scene_prefix TEXT, lighting TEXT DEFAULT 'Studio lighting, highly detailed',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))""")
             logger.info("Migrated: created material table")
+
+        # Migration: create media_library table if missing and migrate data
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='media_library'")
+        if not await cursor.fetchone():
+            await db.execute("""
+CREATE TABLE IF NOT EXISTS media_library (
+    media_id       TEXT PRIMARY KEY,
+    project_id     TEXT,
+    project_title  TEXT,
+    name           TEXT,
+    prompt         TEXT,
+    model_name     TEXT,
+    aspect_ratio   TEXT,
+    media_type     TEXT DEFAULT 'image',
+    url            TEXT,
+    thumb          TEXT,
+    local_path     TEXT,
+    is_cached      INTEGER DEFAULT 0,
+    source         TEXT DEFAULT 'flow',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_media_lib_proj ON media_library(project_id);
+CREATE INDEX IF NOT EXISTS idx_media_lib_cached ON media_library(is_cached);
+CREATE INDEX IF NOT EXISTS idx_media_lib_type ON media_library(media_type);
+CREATE INDEX IF NOT EXISTS idx_media_lib_created ON media_library(created_at);
+""")
+            logger.info("Migrated: created media_library table")
+
+        # Migrate data from ref_image into media_library
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ref_image'")
+        if await cursor.fetchone():
+            await db.execute("""
+INSERT OR IGNORE INTO media_library (media_id, project_id, name, thumb, source, created_at, updated_at)
+SELECT media_id, project_id, name, thumb, 'library', created_at, created_at FROM ref_image WHERE media_id IS NOT NULL AND media_id != ''
+""")
+
+        # Migrate data from flow_media into media_library
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='flow_media'")
+        if await cursor.fetchone():
+            await db.execute("""
+INSERT OR IGNORE INTO media_library (media_id, media_type, url, source, created_at, updated_at)
+SELECT media_id, media_type, url, 'flow', created_at, updated_at FROM flow_media WHERE media_id IS NOT NULL AND media_id != ''
+""")
+
+        # Sync existing local cache files on disk into media_library
+        from agent.config import MEDIA_CACHE_DIR
+        if MEDIA_CACHE_DIR.exists():
+            for p in MEDIA_CACHE_DIR.glob("*.jpg"):
+                if p.stat().st_size > 0:
+                    mid = p.stem
+                    rel_path = f"/output/_cache/{p.name}"
+                    await db.execute(
+                        "UPDATE media_library SET is_cached=1, local_path=? WHERE media_id=? AND (is_cached=0 OR local_path IS NULL)",
+                        (rel_path, mid)
+                    )
+
         await db.commit()
     logger.info("Database initialized at %s", DB_PATH)
 
@@ -364,6 +445,7 @@ async def get_db() -> aiosqlite.Connection:
     if _db_connection is None:
         _db_connection = await aiosqlite.connect(str(DB_PATH))
         _db_connection.row_factory = aiosqlite.Row
+        await _db_connection.execute("PRAGMA busy_timeout=10000")
         await _db_connection.execute("PRAGMA journal_mode=WAL")
         await _db_connection.execute("PRAGMA foreign_keys=ON")
         # Force WAL checkpoint so this connection sees all committed writes

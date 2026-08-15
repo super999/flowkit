@@ -10,8 +10,17 @@ interface Material {
   is_builtin: boolean
 }
 
+const ASPECT_RATIOS = [
+  { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE', label: '💻 横屏 16:9', ratioShort: '16:9', resolution: '1344 × 768', resDesc: '标准高清横屏宽屏' },
+  { value: 'IMAGE_ASPECT_RATIO_PORTRAIT', label: '📱 竖屏 9:16', ratioShort: '9:16', resolution: '768 × 1344', resDesc: '标准手机短视频竖屏' },
+  { value: 'IMAGE_ASPECT_RATIO_SQUARE', label: '⏹ 方形 1:1', ratioShort: '1:1', resolution: '1024 × 1024', resDesc: '正方形头像/插画' },
+  { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE', label: '💻 横屏 4:3', ratioShort: '4:3', resolution: '1152 × 896', resDesc: '4:3 传统横屏/相册' },
+  { value: 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR', label: '📱 竖屏 3:4', ratioShort: '3:4', resolution: '896 × 1152', resDesc: '3:4 经典海报竖屏' },
+]
+
 export default function Txt2ImgPage() {
   const [prompt, setPrompt] = useState('')
+  const [aspectRatio, setAspectRatio] = useState('IMAGE_ASPECT_RATIO_LANDSCAPE')
   const [orientation, setOrientation] = useState<'HORIZONTAL' | 'VERTICAL'>('HORIZONTAL')
   const [selectedMaterial, setSelectedMaterial] = useState('realistic')
   const [materials, setMaterials] = useState<Material[]>([])
@@ -175,7 +184,7 @@ export default function Txt2ImgPage() {
               scene_id: sid,
               project_id: pid,
               video_id: vid_id,
-              orientation: orientation
+              orientation: aspectRatio
             }
           ]
         })
@@ -283,38 +292,40 @@ export default function Txt2ImgPage() {
 
             {/* Config controls */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Orientation selector */}
+              {/* Orientation and Aspect Ratio selector */}
               <div className="space-y-2">
-                <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-                  <Sliders size={14} className="text-blue-400" />
-                  Aspect Ratio (纵横比)
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setOrientation('HORIZONTAL')}
-                    className={`py-2 px-3 text-xs font-semibold rounded border transition-colors ${
-                      orientation === 'HORIZONTAL'
-                        ? 'border-blue-500/50 bg-blue-500/10 text-blue-400'
-                        : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:text-zinc-300'
-                    }`}
-                    disabled={generating}
-                  >
-                    Landscape 16:9 (横版)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOrientation('VERTICAL')}
-                    className={`py-2 px-3 text-xs font-semibold rounded border transition-colors ${
-                      orientation === 'VERTICAL'
-                        ? 'border-blue-500/50 bg-blue-500/10 text-blue-400'
-                        : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:text-zinc-300'
-                    }`}
-                    disabled={generating}
-                  >
-                    Portrait 9:16 (竖版)
-                  </button>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Sliders size={14} className="text-blue-400" />
+                    画幅比例 (Aspect Ratio)
+                  </label>
+                  {(() => {
+                    const aspectObj = ASPECT_RATIOS.find(a => a.value === aspectRatio) || ASPECT_RATIOS[0]
+                    return (
+                      <span className="font-mono text-cyan-300 text-xs font-bold flex items-center gap-1 bg-zinc-900/80 px-2 py-0.5 rounded border border-zinc-800" title="预估生图分辨率">
+                        <span>📐</span>
+                        <span>{aspectObj.resolution} px</span>
+                      </span>
+                    )
+                  })()}
                 </div>
+                <select
+                  value={aspectRatio}
+                  onChange={e => {
+                    const val = e.target.value
+                    setAspectRatio(val)
+                    setOrientation(val.includes('LANDSCAPE') ? 'HORIZONTAL' : 'VERTICAL')
+                  }}
+                  className="w-full py-2 px-3 text-xs font-semibold rounded border text-white bg-zinc-900/50 focus:outline-none transition-colors"
+                  style={{ borderColor: 'var(--border)' }}
+                  disabled={generating}
+                >
+                  {ASPECT_RATIOS.map(a => (
+                    <option key={a.value} value={a.value}>
+                      {a.label} — {a.resolution} px ({a.resDesc})
+                    </option>
+                  ))}
+                </select>
               </div>
 
               {/* Material style selector */}

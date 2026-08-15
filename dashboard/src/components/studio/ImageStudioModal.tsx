@@ -29,7 +29,15 @@ export default function ImageStudioModal({ open, onClose, initialProjectId, onSu
   const [newProjMaterial, setNewProjMaterial] = useState('realistic')
 
   // Scene image state
+  const ASPECT_RATIOS = [
+    { value: 'IMAGE_ASPECT_RATIO_PORTRAIT', label: '📱 竖屏 9:16', ratioShort: '9:16', resolution: '768 × 1344', resDesc: '标准手机短视频竖屏' },
+    { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE', label: '💻 横屏 16:9', ratioShort: '16:9', resolution: '1344 × 768', resDesc: '标准高清横屏宽屏' },
+    { value: 'IMAGE_ASPECT_RATIO_SQUARE', label: '⏹ 方形 1:1', ratioShort: '1:1', resolution: '1024 × 1024', resDesc: '正方形头像/插画' },
+    { value: 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR', label: '📱 竖屏 3:4', ratioShort: '3:4', resolution: '896 × 1152', resDesc: '3:4 经典海报竖屏' },
+    { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE', label: '💻 横屏 4:3', ratioShort: '4:3', resolution: '1152 × 896', resDesc: '4:3 传统横屏/相册' },
+  ]
   const [scenePrompt, setScenePrompt] = useState('')
+  const [sceneAspect, setSceneAspect] = useState<string>('IMAGE_ASPECT_RATIO_PORTRAIT')
   const [orientation, setOrientation] = useState<'HORIZONTAL' | 'VERTICAL'>('VERTICAL')
   const [materials, setMaterials] = useState<{ id: string; name: string }[]>([])
   const [sceneMaterial, setSceneMaterial] = useState('')
@@ -153,7 +161,7 @@ export default function ImageStudioModal({ open, onClose, initialProjectId, onSu
           project_id: selectedProjectId,
           video_id: videoId,
           scene_id: newScene.id,
-          orientation: orientation
+          orientation: sceneAspect
         }]
       })
 
@@ -434,33 +442,57 @@ export default function ImageStudioModal({ open, onClose, initialProjectId, onSu
               </select>
             </div>
 
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-medium">画幅比例:</span>
-                <label className="flex items-center gap-1 text-xs cursor-pointer">
-                  <input
-                    type="radio"
-                    name="orient"
-                    value="VERTICAL"
-                    checked={orientation === 'VERTICAL'}
-                    onChange={() => setOrientation('VERTICAL')}
-                  />
-                  📱 竖屏 (9:16)
-                </label>
-                <label className="flex items-center gap-1 text-xs cursor-pointer">
-                  <input
-                    type="radio"
-                    name="orient"
-                    value="HORIZONTAL"
-                    checked={orientation === 'HORIZONTAL'}
-                    onChange={() => setOrientation('HORIZONTAL')}
-                  />
-                  💻 横屏 (16:9)
-                </label>
+            {/* Aspect ratio & estimated resolution */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-zinc-300">画幅比例 (Aspect Ratio):</label>
+                <select
+                  value={sceneAspect}
+                  onChange={e => {
+                    const val = e.target.value
+                    setSceneAspect(val)
+                    setOrientation(val.includes('LANDSCAPE') ? 'HORIZONTAL' : 'VERTICAL')
+                  }}
+                  className="w-full px-2 py-1.5 rounded text-xs outline-none"
+                  style={{ background: 'var(--card)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                >
+                  {ASPECT_RATIOS.map(a => (
+                    <option key={a.value} value={a.value}>{a.label}</option>
+                  ))}
+                </select>
               </div>
+              <div className="flex flex-col gap-1">
+                {(() => {
+                  const aspectObj = ASPECT_RATIOS.find(a => a.value === sceneAspect) || ASPECT_RATIOS[0]
+                  return (
+                    <>
+                      <label className="text-xs font-medium text-zinc-300 flex items-center justify-between">
+                        <span>预估分辨率:</span>
+                        <span className="text-[10px] text-cyan-400 font-mono font-normal">~100万像素</span>
+                      </label>
+                      <div
+                        className="w-full h-[32px] px-2.5 rounded text-xs flex items-center justify-between border select-none"
+                        style={{ background: 'var(--card)', borderColor: 'var(--border)' }}
+                        title={`当前选定画幅比例生成后的像素大小估计：${aspectObj.resolution} 像素 (${aspectObj.resDesc})`}
+                      >
+                        <span className="font-mono font-bold text-cyan-300 text-xs flex items-center gap-1.5">
+                          <span>📐</span>
+                          <span>{aspectObj.resolution}</span>
+                          <span className="text-[10px] text-zinc-400 font-normal">px</span>
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700/60 font-mono">
+                          {aspectObj.ratioShort}
+                        </span>
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
+            </div>
 
+            <div className="flex justify-end pt-1">
               <Button disabled={loading} onClick={handleGenerateSceneImage} className="gap-1">
-                {loading ? '提交中...' : '🎨 提交画图'}
+                {loading ? '提交中...' : '🎨 提交画图任务'}
               </Button>
             </div>
           </TabsContent>

@@ -36,9 +36,12 @@ def get_cached_image_url(media_id: str) -> Optional[str]:
 
 async def download_to_file(url: str, dest_path: Path) -> bool:
     """Download image binary from url and save atomically to dest_path."""
+    if not url or not url.startswith("http"):
+        return False
     try:
         host = (urlparse(url).hostname or "").lower()
-        if not host.endswith("flow-content.google") and not host.endswith("storage.googleapis.com"):
+        allowed = ("flow-content.google", "storage.googleapis.com", "googleusercontent.com", "google.com")
+        if not any(host.endswith(h) for h in allowed):
             logger.warning("download_to_file: rejected host %s", host)
             return False
 
@@ -105,3 +108,6 @@ def trigger_background_cache(media_id: str, url: Optional[str] = None):
         loop.create_task(cache_media_image(media_id, url))
     except RuntimeError:
         pass
+
+
+fetch_and_cache_media = cache_media_image

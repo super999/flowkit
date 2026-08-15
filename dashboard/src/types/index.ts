@@ -29,6 +29,7 @@ export interface Character {
   entity_type: EntityType
   description: string | null
   image_prompt: string | null
+  image_model?: string | null
   voice_description: string | null
   reference_image_url: string | null
   media_id: string | null
@@ -58,6 +59,7 @@ export interface Scene {
   display_order: number
   prompt: string | null
   image_prompt: string | null
+  image_model?: string | null
   video_prompt: string | null
   character_names: string | null  // JSON string array
   parent_scene_id: string | null

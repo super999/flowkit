@@ -31,8 +31,10 @@ from agent.api.settings import router as settings_router
 from agent.api.llm import router as llm_router
 from agent.api.refgen import router as refgen_router
 from agent.api.ref_images import router as ref_images_router
+from agent.api.media_library import router as media_library_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
+from agent.services.media_sync import start_periodic_sync, stop_periodic_sync
 from agent.services.event_bus import event_bus
 from agent.sdk import init_sdk
 
@@ -109,10 +111,12 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     ws_task = asyncio.create_task(run_ws_server())
     worker_task = asyncio.create_task(controller.start())
-    logger.info("WS server + worker started")
+    start_periodic_sync(interval_seconds=300)
+    logger.info("WS server + worker + periodic sync started")
 
     yield
 
+    stop_periodic_sync()
     controller.request_shutdown()
     await controller.drain()
     ws_task.cancel()
@@ -147,6 +151,7 @@ app.include_router(settings_router, prefix="/api")
 app.include_router(llm_router, prefix="/api")
 app.include_router(refgen_router, prefix="/api")
 app.include_router(ref_images_router, prefix="/api")
+app.include_router(media_library_router, prefix="/api")
 
 
 import secrets as _secrets

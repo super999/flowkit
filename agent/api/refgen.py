@@ -33,7 +33,12 @@ async def list_results(project_id: str):
 
 @router.post("/results")
 async def create_result(body: RefGenCreate):
+    import asyncio
+    from datetime import datetime
     from agent.services.media_cache import trigger_background_cache
+    from agent.services.media_sync import cache_media_item
+
+    # 1. Persist to refgen_results
     res = await crud.create_refgen_result(
         project_id=body.project_id,
         media_id=body.media_id,
@@ -43,7 +48,32 @@ async def create_result(body: RefGenCreate):
         model=body.model,
         duration_ms=body.duration_ms,
     )
+
+    # 2. Immediately upsert to unified media_library so it is instantly visible in Reference Library
+    try:
+        project = await crud.get_project(body.project_id)
+        p_title = (project.get("name") or project.get("title") or "") if project else ""
+        await crud.upsert_media_library_item(
+            media_id=body.media_id,
+            project_id=body.project_id,
+            project_title=p_title,
+            name=body.prompt[:50] if body.prompt else f"参考生图 ({body.media_id[:6]})",
+            prompt=body.prompt,
+            model_name=body.model,
+            aspect_ratio=body.aspect,
+            media_type="IMAGE",
+            url=body.url,
+            thumb=body.url,
+            source="refgen",
+            created_at=datetime.utcnow().isoformat() + "Z",
+        )
+    except Exception as e:
+        pass
+
+    # 3. Trigger immediate local cache download in background
     trigger_background_cache(body.media_id, body.url)
+    asyncio.create_task(cache_media_item(body.media_id, body.url, media_type="IMAGE"))
+
     return res
 
 

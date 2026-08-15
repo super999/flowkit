@@ -714,6 +714,13 @@ class FlowClient:
                     wf.get("createTime", "") or wf.get("creationTime", "") or wf.get("createdAt", "") or
                     wf_meta.get("createTime", "") or wf_meta.get("creationTime", "") or wf_meta.get("createdAt", "")
                 )
+                fife_url = (
+                    gen_img.get("fifeUrl") or gen_img.get("servingUri") or
+                    img.get("fifeUrl") or img.get("servingUri") or
+                    gen_vid.get("downloadUrl") or gen_vid.get("fifeUrl") or
+                    vid.get("downloadUrl") or vid.get("fifeUrl") or
+                    item.get("fifeUrl") or wf.get("fifeUrl") or ""
+                )
 
                 results.append({
                     "mediaKey": media_key,
@@ -723,6 +730,7 @@ class FlowClient:
                     "aspectRatio": aspect,
                     "workflowId": w_id,
                     "createTime": create_time,
+                    "url": fife_url,
                 })
 
         # 2. Fallback Strategy: If projectInitialData returned nothing, query fetch_user_history
@@ -753,6 +761,12 @@ class FlowClient:
                     wf.get("createTime", "") or wf.get("creationTime", "") or wf.get("createdAt", "") or
                     wf_meta.get("createTime", "") or wf_meta.get("creationTime", "") or wf_meta.get("createdAt", "")
                 )
+                fife_url = (
+                    gen_img.get("fifeUrl") or gen_img.get("servingUri") or
+                    img.get("fifeUrl") or img.get("servingUri") or
+                    gen_vid.get("downloadUrl") or gen_vid.get("fifeUrl") or
+                    vid.get("downloadUrl") or vid.get("fifeUrl") or ""
+                )
 
                 results.append({
                     "mediaKey": media_key,
@@ -762,6 +776,7 @@ class FlowClient:
                     "aspectRatio": aspect,
                     "workflowId": gen_id.get("workflowId", ""),
                     "createTime": create_time,
+                    "url": fife_url,
                 })
 
         # 3. Merge local flow_media DB entries ONLY IF they explicitly belong to this project
@@ -794,11 +809,42 @@ class FlowClient:
         return results
 
     async def resolve_media_url(self, media_id: str, timeout: int = 15) -> str:
-        """Resolve a mediaKey/media_id to its signed CDN URL via extension."""
-        url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}"
-        res = await self._send("fetch_redirect", {"url": url}, timeout=timeout)
-        if isinstance(res, dict) and res.get("finalUrl"):
-            return res["finalUrl"]
+        """Resolve a mediaKey/media_id to its signed CDN URL via extension or Google API."""
+        if not media_id:
+            return ""
+
+        # 1. Try getMediaUrlRedirect via extension
+        try:
+            url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}"
+            res = await self._send("fetch_redirect", {"url": url}, timeout=timeout)
+            if isinstance(res, dict):
+                final_url = res.get("finalUrl", "")
+                status = res.get("status", 200)
+                if status == 200 and final_url and (
+                    final_url.startswith("https://flow-content.google") or
+                    "storage.googleapis.com" in final_url or
+                    "googleusercontent.com" in final_url
+                ):
+                    return final_url
+        except Exception as e:
+            logger.debug("resolve_media_url fetch_redirect failed for %s: %s", media_id, e)
+
+        # 2. Fallback: Query media metadata directly via Flow REST API (get_media)
+        try:
+            res_meta = await self.get_media(media_id)
+            if isinstance(res_meta, dict):
+                data = res_meta.get("data", {})
+                if isinstance(data, dict):
+                    fife = (
+                        data.get("fifeUrl") or data.get("servingUri") or
+                        data.get("image", {}).get("fifeUrl") or data.get("image", {}).get("servingUri") or
+                        data.get("video", {}).get("downloadUrl") or data.get("video", {}).get("fifeUrl")
+                    )
+                    if fife and (fife.startswith("https://flow-content.google") or "storage.googleapis.com" in fife or "googleusercontent.com" in fife):
+                        return fife
+        except Exception as e:
+            logger.debug("resolve_media_url get_media fallback failed for %s: %s", media_id, e)
+
         return ""
 
     async def resolve_media_urls(self, media_ids: list[str]) -> dict[str, str]:

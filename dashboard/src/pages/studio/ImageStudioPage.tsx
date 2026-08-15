@@ -6,6 +6,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '../../components/ui/ca
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '../../components/ui/tabs'
+import ImageDetailModal, { type MediaDetailInfo } from '../../components/studio/ImageDetailModal'
 
 const LENS_PRESETS = [
   { label: '特写镜头 (Close-up)', text: 'Close-up shot focused on subject details' },
@@ -120,209 +121,6 @@ function CachedImage({ mediaId, src, alt, className, onClick, onError }: {
   )
 }
 
-interface MediaDetailInfo {
-  title?: string | null
-  src: string
-  mediaId?: string | null
-  prompt?: string | null
-  model?: string | null
-  aspect?: string | null
-  durationMs?: number | null
-  time?: string | null
-  status?: string | null
-  entityType?: string | null
-  sceneOrder?: number | null
-}
-
-function ImageDetailModal({
-  info,
-  onClose,
-  onDownloadAtResolution,
-}: {
-  info: MediaDetailInfo
-  onClose: () => void
-  onDownloadAtResolution: (url: string, mediaId: string | null | undefined, baseName: string, res: '1K' | '2K' | '4K', key: string) => Promise<void>
-}) {
-  const [copiedPrompt, setCopiedPrompt] = useState(false)
-  const [copiedMediaId, setCopiedMediaId] = useState(false)
-
-  // Close on ESC key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
-
-  const copyText = (text: string, type: 'prompt' | 'mediaId') => {
-    navigator.clipboard.writeText(text)
-    if (type === 'prompt') {
-      setCopiedPrompt(true)
-      setTimeout(() => setCopiedPrompt(false), 2000)
-    } else {
-      setCopiedMediaId(true)
-      setTimeout(() => setCopiedMediaId(false), 2000)
-    }
-  }
-
-  const isLocalCached = info.src.startsWith('/output/')
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 md:p-6 bg-black/80 backdrop-blur-md animate-in fade-in duration-150"
-      onClick={onClose}
-    >
-      <div
-        className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl max-w-5xl w-full h-[88vh] max-h-[850px] flex flex-col md:flex-row relative"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Left: Large Image Stage */}
-        <div className="flex-1 flex flex-col items-center justify-between bg-black/60 p-4 relative overflow-hidden border-b md:border-b-0 md:border-r border-zinc-800/80">
-          <div className="w-full flex-1 flex items-center justify-center min-h-0 overflow-hidden">
-            <CachedImage
-              mediaId={info.mediaId}
-              src={info.src}
-              alt={info.title || 'detail'}
-              className="max-w-full max-h-full object-contain rounded-lg shadow-lg cursor-zoom-in"
-              onClick={() => info.src && window.open(info.src, '_blank')}
-            />
-          </div>
-
-          {/* Bottom Download Bar */}
-          <div className="w-full pt-3 mt-2 border-t border-zinc-800/60 flex items-center justify-between flex-wrap gap-2 text-xs">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] text-zinc-400">下载分辨率:</span>
-              {(['1K', '2K', '4K'] as const).map(res => (
-                <button
-                  key={res}
-                  onClick={() => onDownloadAtResolution(info.src, info.mediaId, `detail_${info.mediaId?.slice(0, 8) || 'img'}`, res, 'modal')}
-                  className="text-[11px] px-2 py-1 rounded border border-zinc-700 bg-zinc-900/80 text-zinc-200 hover:border-accent hover:text-white transition-colors"
-                >
-                  ⬇️ {res}
-                </button>
-              ))}
-            </div>
-            {info.src && (
-              <button
-                onClick={() => window.open(info.src, '_blank')}
-                className="text-[11px] px-2.5 py-1 rounded border border-zinc-700 bg-zinc-900/80 text-zinc-300 hover:border-accent hover:text-white transition-colors flex items-center gap-1"
-              >
-                <span>🔗 新标签页打开原图</span>
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Metadata Panel */}
-        <div className="w-full md:w-80 lg:w-96 p-5 flex flex-col gap-4 overflow-y-auto bg-zinc-900/60">
-          <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
-            <div className="flex items-center gap-2">
-              <span className="text-base font-bold text-zinc-100">{info.title || '元数据信息'}</span>
-              {info.status && (
-                <Badge variant="outline" className="text-[10px]">{info.status}</Badge>
-              )}
-            </div>
-            <button
-              onClick={onClose}
-              className="text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded-full bg-zinc-800/60 flex items-center justify-center text-sm transition-colors"
-              title="关闭 (Esc)"
-            >
-              ✕
-            </button>
-          </div>
-
-          {/* Prompt Section */}
-          {info.prompt && (
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-zinc-300">画面提示词 (Prompt)</span>
-                <button
-                  onClick={() => copyText(info.prompt!, 'prompt')}
-                  className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 hover:border-accent text-zinc-400 hover:text-zinc-200 transition-colors"
-                >
-                  {copiedPrompt ? '✓ 已复制' : '📋 复制'}
-                </button>
-              </div>
-              <div className="p-2.5 rounded-lg bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-300 leading-relaxed max-h-40 overflow-y-auto select-text whitespace-pre-wrap">
-                {info.prompt}
-              </div>
-            </div>
-          )}
-
-          {/* Metadata Key-Values */}
-          <div className="flex flex-col gap-2.5 text-xs">
-            <span className="font-semibold text-zinc-300">生成参数与详情</span>
-
-            {/* Media ID */}
-            {info.mediaId && (
-              <div className="flex flex-col gap-0.5 p-2 rounded bg-zinc-950/50 border border-zinc-800/60">
-                <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                  <span>Media ID (UUID)</span>
-                  <button
-                    onClick={() => copyText(info.mediaId!, 'mediaId')}
-                    className="text-[9px] hover:text-accent underline"
-                  >
-                    {copiedMediaId ? '已复制' : '复制'}
-                  </button>
-                </div>
-                <span className="font-mono text-[10px] text-cyan-400 break-all select-all">{info.mediaId}</span>
-              </div>
-            )}
-
-            {/* Grid metrics */}
-            <div className="grid grid-cols-2 gap-2 text-[11px]">
-              {info.sceneOrder !== undefined && (
-                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
-                  <span className="text-[10px] text-zinc-400">分镜序号</span>
-                  <span className="font-semibold text-cyan-300">Scene #{info.sceneOrder}</span>
-                </div>
-              )}
-              {info.entityType && (
-                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
-                  <span className="text-[10px] text-zinc-400">实体类型</span>
-                  <span className="font-semibold text-purple-300">{info.entityType}</span>
-                </div>
-              )}
-              {info.model && (
-                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
-                  <span className="text-[10px] text-zinc-400">生图模型</span>
-                  <span className="font-semibold text-zinc-200">{info.model}</span>
-                </div>
-              )}
-              {info.aspect && (
-                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
-                  <span className="text-[10px] text-zinc-400">画面比例</span>
-                  <span className="font-semibold text-zinc-200">{info.aspect.replace('IMAGE_ASPECT_RATIO_', '')}</span>
-                </div>
-              )}
-              {info.durationMs != null && (
-                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
-                  <span className="text-[10px] text-zinc-400">生成耗时</span>
-                  <span className="font-semibold text-amber-300">{(info.durationMs / 1000).toFixed(1)}s</span>
-                </div>
-              )}
-              <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
-                <span className="text-[10px] text-zinc-400">缓存状态</span>
-                <span className={`font-semibold ${isLocalCached ? 'text-emerald-400' : 'text-zinc-300'}`}>
-                  {isLocalCached ? '✓ 已本地持久化' : '☁️ 远端 CDN'}
-                </span>
-              </div>
-            </div>
-
-            {info.time && (
-              <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col text-[11px]">
-                <span className="text-[10px] text-zinc-400">创建/生成时间</span>
-                <span className="text-zinc-300 font-mono text-[10px]">{info.time}</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function ImageStudioPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -353,6 +151,7 @@ export default function ImageStudioPage() {
   // Scene generation state
   const [scenePrompt, setScenePrompt] = useState(() => localStorage.getItem('flowkit.prompt.scene') || '')
   const [videoTitle, setVideoTitle] = useState('未命名视频')
+  const [sceneAspect, setSceneAspect] = useState<string>(() => localStorage.getItem('flowkit.scene.aspect.v1') || 'IMAGE_ASPECT_RATIO_PORTRAIT')
   const [orientation, setOrientation] = useState<'HORIZONTAL' | 'VERTICAL'>('VERTICAL')
   const [materials, setMaterials] = useState<{ id: string; name: string; scene_prefix?: string }[]>([])
   const [sceneMaterial, setSceneMaterial] = useState('')
@@ -398,12 +197,12 @@ export default function ImageStudioPage() {
   const [refgenResults, setRefgenResults] = useState<{ id: string; url: string; mediaId: string; prompt: string; time: string; aspect?: string; durationMs?: number }[]>([])
 
   // Supported image aspect ratios (from Flow web UI enums)
-  const ASPECT_RATIOS: { value: string; label: string }[] = [
-    { value: 'IMAGE_ASPECT_RATIO_PORTRAIT', label: '📱 竖屏 9:16' },
-    { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE', label: '💻 横屏 16:9' },
-    { value: 'IMAGE_ASPECT_RATIO_SQUARE', label: '⬜ 方形 1:1' },
-    { value: 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR', label: '📱 竖屏 3:4' },
-    { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE', label: '💻 横屏 4:3' },
+  const ASPECT_RATIOS: { value: string; label: string; ratioShort: string; resolution: string; resDesc: string }[] = [
+    { value: 'IMAGE_ASPECT_RATIO_PORTRAIT', label: '📱 竖屏 9:16', ratioShort: '9:16', resolution: '768 × 1344', resDesc: '标准手机短视频竖屏' },
+    { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE', label: '💻 横屏 16:9', ratioShort: '16:9', resolution: '1344 × 768', resDesc: '标准高清横屏宽屏' },
+    { value: 'IMAGE_ASPECT_RATIO_SQUARE', label: '⏹ 方形 1:1', ratioShort: '1:1', resolution: '1024 × 1024', resDesc: '正方形头像/插画' },
+    { value: 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR', label: '📱 竖屏 3:4', ratioShort: '3:4', resolution: '896 × 1152', resDesc: '3:4 经典海报竖屏' },
+    { value: 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE', label: '💻 横屏 4:3', ratioShort: '4:3', resolution: '1152 × 896', resDesc: '4:3 传统横屏/相册' },
   ]
   // Enum → CSS aspect-ratio for result cards (card shape follows chosen ratio)
   const ASPECT_CSS: Record<string, string> = {
@@ -423,9 +222,9 @@ export default function ImageStudioPage() {
   const [scenePageSize] = useState(8)
   const [jumpPage, setJumpPage] = useState('')
 
-  // RefGen results pagination (2 columns grid, 6 cards per page)
+  // RefGen results pagination (3 columns grid, 9 cards per page)
   const [refgenPage, setRefgenPage] = useState(1)
-  const [refgenPageSize] = useState(6)
+  const [refgenPageSize] = useState(9)
   const [refgenJumpPage, setRefgenJumpPage] = useState('')
   const totalRefgenPages = Math.max(1, Math.ceil(refgenResults.length / refgenPageSize))
   const safeRefgenPage = Math.min(refgenPage, totalRefgenPages)
@@ -587,6 +386,9 @@ export default function ImageStudioPage() {
     try { localStorage.setItem('flowkit.prompt.scene', scenePrompt) } catch { /* ignore */ }
   }, [scenePrompt])
   useEffect(() => {
+    try { localStorage.setItem('flowkit.scene.aspect.v1', sceneAspect) } catch { /* ignore */ }
+  }, [sceneAspect])
+  useEffect(() => {
     try { localStorage.setItem('flowkit.prompt.refgen', refgenPrompt) } catch { /* ignore */ }
   }, [refgenPrompt])
   // Persist refgen selections: uploaded refs, selected entities, model, aspect
@@ -746,7 +548,7 @@ export default function ImageStudioPage() {
           project_id: selectedProjectId,
           video_id: vid,
           scene_id: newScene.id,
-          orientation: orientation
+          orientation: sceneAspect
         }]
       })
 
@@ -802,12 +604,52 @@ export default function ImageStudioPage() {
     setScenePrompt(prev => prev ? `${prev}, ${presetText}` : presetText)
   }
 
-  // Download original-resolution image via backend proxy (same file Flow web downloads)
-  function downloadImage(url: string, name: string) {
-    const a = document.createElement('a')
-    a.href = `/api/flow/media/image/download?url=${encodeURIComponent(url)}&name=${encodeURIComponent(name)}`
-    a.download = name
-    a.click()
+  // Download original-resolution image via backend proxy (supports local cache, media_id, and Flow CDN)
+  async function downloadImage(url: string, name: string, mediaId?: string | null) {
+    try {
+      const fileName = name.endsWith('.jpg') || name.endsWith('.png') ? name : `${name}.jpg`
+      const downloadUrl = `/api/flow/media/image/download?${mediaId ? `media_id=${mediaId}&` : ''}url=${encodeURIComponent(url)}&name=${encodeURIComponent(fileName)}`
+      const res = await fetch(downloadUrl)
+      if (res.ok) {
+        const blob = await res.blob()
+        const blobUrl = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = blobUrl
+        a.download = fileName
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(blobUrl)
+        setStatusMsg(`✅ 已下载 1K 原图`)
+        return
+      }
+      // Fallback to direct fetch
+      const direct = await fetch(url)
+      if (direct.ok) {
+        const blob = await direct.blob()
+        const blobUrl = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = blobUrl
+        a.download = fileName
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(blobUrl)
+        setStatusMsg(`✅ 已下载 1K 原图`)
+        return
+      }
+      // Direct window open fallback if fetch blob fails
+      const a = document.createElement('a')
+      a.href = url
+      a.target = '_blank'
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setStatusMsg(`✅ 已在新标签页触发 1K 原图下载`)
+    } catch (e: any) {
+      alert(`❌ 下载 1K 原图失败: ${e.message || e}`)
+    }
   }
 
   // Download at 1K (original) / 2K / 4K — 2K/4K upsample is synchronous via /api/flow/upscale-image
@@ -815,11 +657,15 @@ export default function ImageStudioPage() {
 
   async function downloadAtResolution(url: string, mediaId: string | null | undefined, baseName: string, res: '1K' | '2K' | '4K', key: string) {
     if (!url) { alert('没有可下载的图片'); return }
-    if (res === '1K') { downloadImage(url, `${baseName}.jpg`); return }
-    if (!mediaId) { alert('缺少 media_id，无法放大，请先重新生成图片'); return }
 
     setDownloading({ id: key, res })
     try {
+      if (res === '1K') {
+        await downloadImage(url, `${baseName}.jpg`, mediaId)
+        return
+      }
+      if (!mediaId) { alert('缺少 media_id，无法放大，请先重新生成图片'); return }
+
       const resp = await postAPI<{ media_id?: string; base64?: string; size_bytes?: number; error?: string }>(
         '/api/flow/upscale-image', {
           media_id: mediaId,
@@ -834,7 +680,9 @@ export default function ImageStudioPage() {
       const a = document.createElement('a')
       a.href = blobUrl
       a.download = `${baseName}_${res}.jpg`
+      document.body.appendChild(a)
       a.click()
+      document.body.removeChild(a)
       URL.revokeObjectURL(blobUrl)
       setStatusMsg(`✅ 已下载 ${res} 图片（${((resp.size_bytes || 0) / 1048576).toFixed(1)} MB）`)
     } catch (e: any) {
@@ -1147,8 +995,8 @@ export default function ImageStudioPage() {
       {/* Main Studio Grid: Left Control Panel + Right Live Gallery */}
       <div className="grid grid-cols-12 gap-5">
         
-        {/* Left Side: Generation Control Workbench (5 cols) */}
-        <div className="col-span-12 lg:col-span-5 flex flex-col gap-4">
+        {/* Left Side: Generation Control Workbench (7 cols on xl, 6 cols on lg) */}
+        <div className="col-span-12 lg:col-span-6 xl:col-span-7 flex flex-col gap-4">
           
           <Tabs value={activeTab} onValueChange={v => navigate(`/studio/${v}`)}>
             <TabsList className="w-full grid grid-cols-4">
@@ -1326,30 +1174,51 @@ export default function ImageStudioPage() {
                   </div>
                 </div>
 
-                {/* Orientation Selector */}
-                <div className="flex items-center justify-between p-2.5 rounded border" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                  <span className="text-xs font-medium">画幅方向:</span>
-                  <div className="flex gap-3">
-                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                      <input
-                        type="radio"
-                        name="studioOrient"
-                        value="VERTICAL"
-                        checked={orientation === 'VERTICAL'}
-                        onChange={() => setOrientation('VERTICAL')}
-                      />
-                      📱 竖屏 (9:16)
-                    </label>
-                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                      <input
-                        type="radio"
-                        name="studioOrient"
-                        value="HORIZONTAL"
-                        checked={orientation === 'HORIZONTAL'}
-                        onChange={() => setOrientation('HORIZONTAL')}
-                      />
-                      💻 横屏 (16:9)
-                    </label>
+                {/* Aspect Ratio & Estimated Resolution */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium text-zinc-300">画幅比例 (Aspect Ratio):</label>
+                    <select
+                      value={sceneAspect}
+                      onChange={e => {
+                        const val = e.target.value
+                        setSceneAspect(val)
+                        setOrientation(val.includes('LANDSCAPE') ? 'HORIZONTAL' : 'VERTICAL')
+                      }}
+                      className="w-full px-2 py-2 rounded text-xs outline-none"
+                      style={{ background: 'var(--card)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                    >
+                      {ASPECT_RATIOS.map(a => (
+                        <option key={a.value} value={a.value}>{a.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {(() => {
+                      const aspectObj = ASPECT_RATIOS.find(a => a.value === sceneAspect) || ASPECT_RATIOS[0]
+                      return (
+                        <>
+                          <label className="text-xs font-medium text-zinc-300 flex items-center justify-between">
+                            <span>预估分辨率 (Resolution):</span>
+                            <span className="text-[10px] text-cyan-400 font-mono font-normal">~100万像素</span>
+                          </label>
+                          <div
+                            className="w-full h-[34px] px-2.5 rounded text-xs flex items-center justify-between border select-none"
+                            style={{ background: 'var(--card)', borderColor: 'var(--border)' }}
+                            title={`当前选定画幅比例生成后的像素大小估计：${aspectObj.resolution} 像素 (${aspectObj.resDesc})`}
+                          >
+                            <span className="font-mono font-bold text-cyan-300 text-xs flex items-center gap-1.5">
+                              <span>📐</span>
+                              <span>{aspectObj.resolution}</span>
+                              <span className="text-[10px] text-zinc-400 font-normal">px</span>
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700/60 font-mono">
+                              {aspectObj.ratioShort}
+                            </span>
+                          </div>
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
 
@@ -1440,6 +1309,16 @@ export default function ImageStudioPage() {
                   />
                 </div>
 
+                <div className="flex items-center justify-between p-2 rounded border text-xs" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                  <span className="text-zinc-400">
+                    {charType === 'location' ? '💻 场景实体规范 (16:9 横屏)' : '📱 角色/道具实体规范 (9:16 竖屏)'}
+                  </span>
+                  <span className="font-mono text-cyan-300 font-bold flex items-center gap-1">
+                    <span>📐</span>
+                    <span>{charType === 'location' ? '1344 × 768 px' : '768 × 1344 px'}</span>
+                  </span>
+                </div>
+
                 <Button
                   disabled={loading}
                   onClick={handleGenerateCharacterRef}
@@ -1508,31 +1387,120 @@ export default function ImageStudioPage() {
                     粘贴区：点击上方按钮激活后，直接 Ctrl+V 粘贴剪贴板图片；或点击「从本地选择图片」上传文件
                   </div>
 
-                  {/* Uploaded images */}
+                  {/* Uploaded and Library-selected reference images */}
                   {refgenUploads.length > 0 && (
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[10px] font-semibold" style={{ color: 'var(--cyan)' }}>
-                        已上传图片 ({refgenUploads.length}):
-                      </span>
-                      <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-col gap-2 p-3 rounded-xl border bg-zinc-950/40" style={{ borderColor: 'var(--border)' }}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold flex items-center gap-1.5" style={{ color: 'var(--cyan)' }}>
+                            <span>🖼️ 当前选定参考图 ({refgenUploads.length})</span>
+                          </span>
+                          <span className="text-[10px] text-zinc-400">（点击图片可查看大图与元数据）</span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setRefgenUploads([])
+                            try { localStorage.setItem('flowkit.refgen.uploads.v1', '[]') } catch {}
+                          }}
+                          className="text-[10px] px-2 py-0.5 rounded border border-zinc-800 hover:border-red-500/80 text-zinc-400 hover:text-red-400 transition-colors"
+                        >
+                          清空参考图
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                         {refgenUploads.map(u => (
-                          <div key={u.uid} className="relative group">
-                            <div className="w-16 h-16 rounded overflow-hidden bg-black border" style={{ borderColor: 'var(--accent)' }}>
-                              <img src={u.dataUrl} alt={u.name} className="w-full h-full object-cover" />
-                            </div>
-                            <button
-                              onClick={() => setRefgenUploads(prev => prev.filter(x => x.uid !== u.uid))}
-                              className="absolute -top-1.5 -right-1.5 w-4.5 h-4.5 min-w-4 text-[9px] leading-none rounded-full bg-red-500 text-white flex items-center justify-center opacity-70 group-hover:opacity-100"
-                              title="移除"
+                          <div
+                            key={u.uid}
+                            className="p-2 rounded-lg border flex flex-col gap-1.5 relative group transition-all hover:border-cyan-500/80 bg-zinc-900/90 shadow-sm"
+                            style={{ borderColor: 'var(--border)' }}
+                          >
+                            {/* Preview Image Box */}
+                            <div
+                              onClick={() => {
+                                setActiveMediaDetail({
+                                  title: u.name || '参考图',
+                                  src: u.dataUrl,
+                                  mediaId: u.mediaId,
+                                  prompt: u.name,
+                                  source: u.uploadMs ? 'upload' : 'library',
+                                })
+                              }}
+                              className="w-full aspect-square rounded-md overflow-hidden bg-black flex items-center justify-center border border-zinc-800/80 cursor-pointer relative group/img"
+                              title="点击查看高清大图与元数据"
                             >
-                              ✕
-                            </button>
-                            <span className="block text-[9px] truncate max-w-16" style={{ color: 'var(--muted)' }} title={u.name}>
-                              {u.name}
-                            </span>
-                            <span className="block text-[8px]" style={{ color: 'var(--muted)' }}>
-                              ⏱ 上传 {(u.uploadMs / 1000).toFixed(1)}s
-                            </span>
+                              <img
+                                src={u.dataUrl}
+                                alt={u.name}
+                                className="w-full h-full object-cover group-hover/img:scale-105 transition-transform duration-200"
+                              />
+                              {/* Hover preview overlay */}
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center text-white text-[10px] font-medium backdrop-blur-[1px]">
+                                <span>🔍 查看大图</span>
+                              </div>
+                              {/* Remove button */}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setRefgenUploads(prev => {
+                                    const next = prev.filter(x => x.uid !== u.uid)
+                                    try { localStorage.setItem('flowkit.refgen.uploads.v1', JSON.stringify(next)) } catch {}
+                                    return next
+                                  })
+                                }}
+                                className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/80 hover:bg-red-600 text-zinc-300 hover:text-white flex items-center justify-center text-[10px] backdrop-blur-sm transition-colors z-10 shadow"
+                                title="移除此参考图"
+                              >
+                                ✕
+                              </button>
+                              {/* Type tag */}
+                              <div className="absolute top-1 left-1 z-10">
+                                <span className="text-[8px] px-1.5 py-0.2 rounded bg-black/80 text-cyan-300 border border-cyan-700/60 backdrop-blur-sm font-medium">
+                                  {u.uploadMs ? '📁 上传' : '📚 图库'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Info */}
+                            <div className="flex flex-col gap-1">
+                              <span
+                                className="text-[11px] font-medium text-zinc-200 line-clamp-2 leading-tight cursor-pointer hover:text-cyan-300 transition-colors"
+                                title={u.name}
+                                onClick={() => {
+                                  setActiveMediaDetail({
+                                    title: u.name || '参考图',
+                                    src: u.dataUrl,
+                                    mediaId: u.mediaId,
+                                    prompt: u.name,
+                                    source: u.uploadMs ? 'upload' : 'library',
+                                  })
+                                }}
+                              >
+                                {u.name || '参考图'}
+                              </span>
+
+                              {/* Media ID display with copy */}
+                              {u.mediaId ? (
+                                <div className="flex items-center justify-between p-1 rounded bg-zinc-950/80 border border-zinc-800/80 text-[9px]">
+                                  <span className="font-mono text-cyan-400/90 truncate mr-1" title={`完整 Media ID: ${u.mediaId}`}>
+                                    {u.mediaId.slice(0, 8)}...
+                                  </span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      navigator.clipboard.writeText(u.mediaId)
+                                      alert(`已复制 Media ID:\n${u.mediaId}`)
+                                    }}
+                                    className="text-[9px] text-zinc-400 hover:text-cyan-300 px-1 py-0.2 rounded border border-zinc-700 hover:border-cyan-500 transition-colors shrink-0"
+                                    title="复制完整 UUID"
+                                  >
+                                    📋
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="text-[9px] text-zinc-500">（本地临时文件）</span>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -1540,58 +1508,125 @@ export default function ImageStudioPage() {
                   )}
 
                   {/* Persistent reference library — compact entry, full page for browsing */}
-                  <div className="flex items-center justify-between p-2 rounded border" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                    <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                      📚 参考图库：上传的图片 + Flow 项目媒体（生成/上传的都算）
-                    </span>
+                  <div className="flex items-center justify-between p-2.5 rounded-xl border" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                    <div className="flex flex-col">
+                      <span className="text-xs font-semibold text-zinc-200">
+                        📚 统一参考图库 (Reference Library)
+                      </span>
+                      <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+                        收录 Flow 项目媒体与自主上传图片，支持一键加入参考列表
+                      </span>
+                    </div>
                     <button
                       onClick={() => navigate('/studio/ref-library')}
-                      className="px-2 py-1 rounded text-[11px] font-medium text-white shadow"
+                      className="px-3 py-1.5 rounded text-xs font-medium text-white shadow hover:opacity-90 transition-opacity flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg, #10b981, #06b6d4)' }}
                     >
-                      打开完整图库 ({(refLibrary.length)})
+                      <span>打开完整图库 ({refLibrary.length})</span>
+                      <span>➡️</span>
                     </button>
                   </div>
 
                   {/* Project entity references */}
-                  {characters.length === 0 ? (
-                    <div className="p-3 text-center text-[11px] border rounded border-dashed" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
-                      项目暂无角色/实体参考图，可先上传本地图片，或到【👥 角色参考图】tab 生成
+                  <div className="flex flex-col gap-2 p-3 rounded-xl border bg-zinc-950/40" style={{ borderColor: 'var(--border)' }}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold" style={{ color: 'var(--text)' }}>
+                        👥 项目角色/场景实体参考 ({characters.length}):
+                      </span>
+                      <span className="text-[10px] text-zinc-400">勾选将作为参考图注入</span>
                     </div>
-                  ) : (
-                    <div className="grid grid-cols-3 gap-2 max-h-52 overflow-auto pr-1">
-                      {characters.map(c => {
-                        const selected = refgenSelected.includes(c.media_id || c.id)
-                        return (
-                          <button
-                            key={c.id}
-                            onClick={() => c.media_id && toggleRefgenSelect(c.media_id)}
-                            disabled={!c.media_id || !c.reference_image_url}
-                            className="flex flex-col gap-1 p-1.5 rounded border transition-colors disabled:opacity-40 text-left"
-                            style={{
-                              borderColor: selected ? 'var(--accent)' : 'var(--border)',
-                              background: selected ? 'color-mix(in srgb, var(--accent) 12%, var(--card))' : 'var(--card)',
-                            }}
-                            title={c.media_id ? c.name : `${c.name}（无参考图）`}
-                          >
-                            <div className="w-full aspect-square rounded overflow-hidden bg-black flex items-center justify-center">
-                              {c.reference_image_url ? (
-                                <CachedImage mediaId={c.media_id} src={c.reference_image_url} alt={c.name} className="w-full h-full object-cover" />
-                              ) : (
-                                <span className="text-[9px]" style={{ color: 'var(--muted)' }}>无图</span>
-                              )}
+
+                    {characters.length === 0 ? (
+                      <div className="p-3 text-center text-[11px] border rounded border-dashed" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
+                        项目暂无角色/实体参考图，可先上传本地图片，或到【👥 角色参考图】tab 生成
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 max-h-60 overflow-auto pr-1">
+                        {characters.map(c => {
+                          const selected = refgenSelected.includes(c.media_id || c.id)
+                          const openDetail = () => c.reference_image_url && setActiveMediaDetail({
+                            title: `角色/实体: ${c.name}`,
+                            src: c.reference_image_url,
+                            mediaId: c.media_id,
+                            prompt: c.image_prompt || c.description,
+                            entityType: c.entity_type,
+                            aspect: c.entity_type === 'location' ? '16:9' : '9:16',
+                            model: c.image_model || 'GEM_PIX_2',
+                          })
+
+                          return (
+                            <div
+                              key={c.id}
+                              className="flex flex-col gap-1.5 p-2 rounded-lg border transition-all text-left relative group shadow-sm"
+                              style={{
+                                borderColor: selected ? 'var(--cyan)' : 'var(--border)',
+                                background: selected ? 'color-mix(in srgb, var(--cyan) 10%, var(--card))' : 'var(--surface)',
+                              }}
+                            >
+                              <div
+                                className="w-full aspect-square rounded-md overflow-hidden bg-black flex items-center justify-center border border-zinc-800/80 cursor-pointer relative group/img"
+                                onClick={openDetail}
+                                title="点击查看高清大图与元数据"
+                              >
+                                {c.reference_image_url ? (
+                                  <CachedImage mediaId={c.media_id} src={c.reference_image_url} alt={c.name} className="w-full h-full object-cover group-hover/img:scale-105 transition-transform duration-200" />
+                                ) : (
+                                  <span className="text-[9px]" style={{ color: 'var(--muted)' }}>无图</span>
+                                )}
+                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center text-white text-[10px] font-medium backdrop-blur-[1px]">
+                                  <span>🔍 查看大图</span>
+                                </div>
+                                <div className="absolute top-1 left-1 z-10">
+                                  <Badge variant="outline" className="text-[8px] px-1 py-0.2 bg-black/80 text-zinc-300 border-zinc-700">
+                                    {c.entity_type || 'char'}
+                                  </Badge>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-col gap-1">
+                                <span className="text-[11px] font-semibold truncate" style={{ color: selected ? 'var(--cyan)' : 'var(--text)' }} title={c.name}>
+                                  {c.name}
+                                </span>
+                                {c.media_id && (
+                                  <div className="flex items-center justify-between p-1 rounded bg-zinc-950/80 border border-zinc-800/80 text-[9px]">
+                                    <span className="font-mono text-cyan-400/90 truncate mr-1" title={c.media_id}>
+                                      {c.media_id.slice(0, 8)}...
+                                    </span>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        navigator.clipboard.writeText(c.media_id!)
+                                        alert(`已复制 Media ID:\n${c.media_id}`)
+                                      }}
+                                      className="text-[9px] text-zinc-400 hover:text-cyan-300 px-1 py-0.2 rounded border border-zinc-700 hover:border-cyan-500 transition-colors shrink-0"
+                                      title="复制完整 UUID"
+                                    >
+                                      📋
+                                    </button>
+                                  </div>
+                                )}
+                                <button
+                                  onClick={() => c.media_id && toggleRefgenSelect(c.media_id)}
+                                  disabled={!c.media_id || !c.reference_image_url}
+                                  className={`w-full py-1 text-[10px] rounded border transition-colors font-medium mt-0.5 ${
+                                    selected
+                                      ? 'bg-cyan-600 hover:bg-cyan-500 text-white border-cyan-500'
+                                      : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
+                                  }`}
+                                >
+                                  {selected ? '✓ 已选用' : '＋ 选用此实体'}
+                                </button>
+                              </div>
                             </div>
-                            <span className="text-[9px] truncate" style={{ color: selected ? 'var(--accent)' : 'var(--muted)' }}>
-                              {selected ? '✓ ' : ''}{c.name}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  )}
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+
                   {(refgenSelected.length > 0 || refgenUploads.length > 0) && (
                     <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                      已选 {refgenSelected.length} 个实体 + {refgenUploads.length} 张上传图片 — 将作为 IMAGE_INPUT_TYPE_REFERENCE 传入
+                      已选 {refgenSelected.length} 个实体 + {refgenUploads.length} 张参考图 — 将作为 IMAGE_INPUT_TYPE_REFERENCE 传入
                     </span>
                   )}
                 </div>
@@ -1643,9 +1678,9 @@ export default function ImageStudioPage() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <div className="flex flex-col gap-1">
-                    <label className="text-xs font-medium">生图模型:</label>
+                    <label className="text-xs font-medium text-zinc-300">生图模型:</label>
                     <select
                       value={refgenModel}
                       onChange={e => setRefgenModel(e.target.value)}
@@ -1658,7 +1693,7 @@ export default function ImageStudioPage() {
                     </select>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <label className="text-xs font-medium">画幅比例 (Aspect Ratio):</label>
+                    <label className="text-xs font-medium text-zinc-300">画幅比例 (Aspect Ratio):</label>
                     <select
                       value={refgenAspect}
                       onChange={e => setRefgenAspect(e.target.value)}
@@ -1669,6 +1704,33 @@ export default function ImageStudioPage() {
                         <option key={a.value} value={a.value}>{a.label}</option>
                       ))}
                     </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {(() => {
+                      const aspectObj = ASPECT_RATIOS.find(a => a.value === refgenAspect) || ASPECT_RATIOS[0]
+                      return (
+                        <>
+                          <label className="text-xs font-medium text-zinc-300 flex items-center justify-between">
+                            <span>预估分辨率 (Resolution):</span>
+                            <span className="text-[10px] text-cyan-400 font-mono font-normal">~100万像素</span>
+                          </label>
+                          <div
+                            className="w-full h-[34px] px-2.5 rounded text-xs flex items-center justify-between border select-none"
+                            style={{ background: 'var(--card)', borderColor: 'var(--border)' }}
+                            title={`当前选定画幅比例生成后的像素大小估计：${aspectObj.resolution} 像素 (${aspectObj.resDesc})`}
+                          >
+                            <span className="font-mono font-bold text-cyan-300 text-xs flex items-center gap-1.5">
+                              <span>📐</span>
+                              <span>{aspectObj.resolution}</span>
+                              <span className="text-[10px] text-zinc-400 font-normal">px</span>
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700/60 font-mono">
+                              {aspectObj.ratioShort}
+                            </span>
+                          </div>
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
 
@@ -1718,8 +1780,8 @@ export default function ImageStudioPage() {
 
         </div>
 
-        {/* Right Side: Real-Time Gallery & Request Queue (7 cols) */}
-        <div className="col-span-12 lg:col-span-7 flex flex-col gap-4">
+        {/* Right Side: Real-Time Gallery & Request Queue (5 cols on xl, 6 cols on lg) */}
+        <div className="col-span-12 lg:col-span-6 xl:col-span-5 flex flex-col gap-4">
           <Card className="py-4 h-full flex flex-col">
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
@@ -1761,7 +1823,7 @@ export default function ImageStudioPage() {
                     </div>
                   ) : (
                     <>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-2 xl:grid-cols-3 gap-2.5">
                         {pageRefgenResults.map((r, idx) => {
                           const globalIdx = idx + (safeRefgenPage - 1) * refgenPageSize
                           const dlState = downloading?.id === r.id ? downloading.res : null
@@ -1776,15 +1838,15 @@ export default function ImageStudioPage() {
                             time: r.time,
                           })
                           return (
-                            <div key={r.id} className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                              <div className="flex items-center justify-between">
-                                <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                                  {r.time}{r.durationMs ? ` · ⏱ 生成 ${(r.durationMs / 1000).toFixed(1)}s` : ''}
+                            <div key={r.id} className="p-2 rounded-lg border flex flex-col gap-1.5 shadow-sm" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="text-[9px] truncate" style={{ color: 'var(--muted)' }} title={r.time}>
+                                  {r.time ? r.time.slice(5) : ''}{r.durationMs ? ` · ${(r.durationMs / 1000).toFixed(1)}s` : ''}
                                 </span>
-                                <div className="flex gap-0.5 items-center">
+                                <div className="flex gap-0.5 items-center shrink-0">
                                   <button
                                     onClick={openDetail}
-                                    className="text-[10px] px-1.5 py-0.5 rounded border hover:border-cyan-400 text-cyan-400 transition-colors"
+                                    className="text-[9px] px-1.5 py-0.5 rounded border border-zinc-700 hover:border-cyan-400 hover:text-cyan-400 text-zinc-300 hover:bg-cyan-500/10 transition-colors"
                                     title="查看高清大图与元数据"
                                   >
                                     ℹ️
@@ -1794,8 +1856,7 @@ export default function ImageStudioPage() {
                                       key={res}
                                       disabled={dlState !== null}
                                       onClick={() => downloadAtResolution(r.url, r.mediaId, `refgen_${r.id.slice(0, 8)}`, res, r.id)}
-                                      className="text-[10px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
-                                      style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}
+                                      className="text-[9px] px-1 py-0.5 rounded border border-zinc-700 hover:border-cyan-400 hover:text-cyan-400 hover:bg-cyan-500/10 text-zinc-300 transition-colors disabled:opacity-50"
                                       title={`下载 ${res} 分辨率`}
                                     >
                                       {dlState === res ? '⏳' : `⬇️${res}`}
@@ -1814,7 +1875,9 @@ export default function ImageStudioPage() {
                               >
                                 <CachedImage mediaId={r.mediaId} src={r.url} alt={`refgen-${globalIdx}`} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                               </div>
-                              <span className="text-[11px] line-clamp-2 leading-relaxed" style={{ color: 'var(--text)' }}>{r.prompt}</span>
+                              <span className="text-[10px] line-clamp-2 leading-tight" style={{ color: 'var(--text)' }} title={r.prompt}>
+                                {r.prompt}
+                              </span>
                             </div>
                           )
                         })}
@@ -1917,6 +1980,8 @@ export default function ImageStudioPage() {
                         mediaId: c.media_id,
                         prompt: c.image_prompt || c.description,
                         entityType: c.entity_type,
+                        aspect: c.entity_type === 'location' ? '16:9' : '9:16',
+                        model: c.image_model || 'GEM_PIX_2',
                       })
                       return (
                         <div key={c.id} className="p-2.5 rounded-lg border flex flex-col gap-2 relative group" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
@@ -2040,6 +2105,8 @@ export default function ImageStudioPage() {
                         prompt: s.prompt,
                         sceneOrder: s.display_order || globalIdx+1,
                         status: status,
+                        aspect: s.vertical_image_url ? '9:16' : (s.horizontal_image_url ? '16:9' : undefined),
+                        model: s.image_model || 'GEM_PIX_2',
                         time: s.created_at ? new Date(s.created_at).toLocaleString() : undefined,
                       })
                       return (
@@ -2074,8 +2141,7 @@ export default function ImageStudioPage() {
                                       key={res}
                                       disabled={dlState !== null}
                                       onClick={() => handleSceneDownload(s, globalIdx, res)}
-                                      className="text-[10px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
-                                      style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}
+                                      className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 hover:border-cyan-400 hover:text-cyan-400 hover:bg-cyan-500/10 text-zinc-300 transition-colors disabled:opacity-50"
                                       title={`下载 ${res} 分辨率`}
                                     >
                                       {dlState === res ? '⏳' : `⬇️${res}`}

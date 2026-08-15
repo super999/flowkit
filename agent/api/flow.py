@@ -1,7 +1,7 @@
 """Direct Flow API endpoints — for manual operations outside the queue."""
 import json
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from agent.services.flow_client import get_flow_client
@@ -335,32 +335,71 @@ async def test_resolve_media(body: dict):
 
 
 @router.get("/media/image/download")
-async def download_image(url: str, name: str = "image.jpg"):
-    """Proxy-download an image from a Flow CDN URL (original resolution).
-
-    The Flow web UI's "download" is exactly this: fetch the fifeUrl content
-    and save it. Restricts source hosts to Google's CDN to avoid SSRF.
-    """
+async def download_image(url: str = "", media_id: str | None = None, name: str = "image.jpg"):
+    """Proxy-download an image (local cache or Flow CDN, original resolution)."""
     from urllib.parse import urlparse
     import aiohttp
-
-    host = (urlparse(url).hostname or "").lower()
-    if not host.endswith("flow-content.google") and not host.endswith("storage.googleapis.com"):
-        raise HTTPException(400, "url must point to flow-content.google or storage.googleapis.com")
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-            if resp.status != 200:
-                raise HTTPException(502, f"download failed: HTTP {resp.status}")
-            data = await resp.read()
-            media_type = resp.headers.get("content-type", "image/jpeg")
+    from agent.config import OUTPUT_DIR
+    from agent.services.media_cache import fetch_and_cache_media, get_cached_image_path
 
     safe_name = "".join(c for c in name if c.isalnum() or c in "._-") or "image.jpg"
-    return Response(
-        content=data,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
-    )
+    if not safe_name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        safe_name += ".jpg"
+
+    # 1. Check media_id in local cache
+    if media_id:
+        cache_file = get_cached_image_path(media_id)
+        if cache_file.exists() and cache_file.stat().st_size > 0:
+            return FileResponse(
+                str(cache_file),
+                media_type="image/jpeg",
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+            )
+
+    # 2. Check local path in url (e.g. /output/_cache/... or full http://.../output/...)
+    if "/output/" in url or url.startswith("output/"):
+        rel_path = url.split("/output/")[-1] if "/output/" in url else url.replace("output/", "")
+        local_file = OUTPUT_DIR / rel_path
+        if local_file.exists() and local_file.stat().st_size > 0:
+            return FileResponse(
+                str(local_file),
+                media_type="image/jpeg",
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+            )
+
+    # 3. If media_id is given, resolve and cache
+    if media_id:
+        cached_path = await fetch_and_cache_media(media_id, url)
+        if cached_path and cached_path.exists():
+            return FileResponse(
+                str(cached_path),
+                media_type="image/jpeg",
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+            )
+
+    # 4. Fallback to direct HTTP fetch
+    if url:
+        host = (urlparse(url).hostname or "").lower()
+        if (
+            host.endswith("google.com")
+            or host.endswith("googleusercontent.com")
+            or host.endswith("ggpht.com")
+            or host.endswith("flow-content.google")
+            or host.endswith("storage.googleapis.com")
+            or host in ("127.0.0.1", "localhost")
+        ):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        media_type = resp.headers.get("content-type", "image/jpeg")
+                        return Response(
+                            content=data,
+                            media_type=media_type,
+                            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+                        )
+
+    raise HTTPException(404, "Image not found or download failed")
 
 
 class UploadImageDataRequest(BaseModel):

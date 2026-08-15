@@ -8,7 +8,7 @@ from agent.db.schema import get_db, _db_lock
 
 logger = logging.getLogger(__name__)
 
-_VALID_TABLES = frozenset({"character", "project", "video", "scene", "request", "material", "refgen_result", "ref_image", "flow_media"})
+_VALID_TABLES = frozenset({"character", "project", "video", "scene", "request", "material", "refgen_result", "ref_image", "flow_media", "media_library"})
 
 
 def _validate_table(table: str) -> None:
@@ -31,6 +31,7 @@ _COLUMNS = {
               "vertical_end_scene_media_id", "horizontal_end_scene_media_id",
               "trim_start", "trim_end", "duration", "display_order", "source", "transition_prompt", "narrator_text", "updated_at"},
     "request": {"status", "request_id", "media_id", "output_url", "error_message", "retry_count", "next_retry_at", "source_media_id", "updated_at"},
+    "media_library": {"project_id", "project_title", "name", "prompt", "model_name", "aspect_ratio", "media_type", "url", "thumb", "local_path", "is_cached", "source", "updated_at"},
 }
 
 
@@ -407,3 +408,216 @@ async def list_materials() -> list[dict]:
     db = await get_db()
     cur = await db.execute("SELECT * FROM material ORDER BY created_at")
     return [dict(r) for r in await cur.fetchall()]
+
+
+# ─── Media Library (Consolidated) ───────────────────────────
+
+async def upsert_media_library_item(
+    media_id: str,
+    project_id: str = None,
+    project_title: str = None,
+    name: str = None,
+    prompt: str = None,
+    model_name: str = None,
+    aspect_ratio: str = None,
+    media_type: str = "image",
+    url: str = None,
+    thumb: str = None,
+    local_path: str = None,
+    is_cached: int = 0,
+    source: str = "flow",
+) -> dict | None:
+    if not media_id:
+        return None
+    db = await get_db()
+    now = _now()
+    async with _db_lock:
+        await db.execute(
+            """INSERT INTO media_library (
+                media_id, project_id, project_title, name, prompt, model_name,
+                aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
+                created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(media_id) DO UPDATE SET
+                project_id = COALESCE(excluded.project_id, media_library.project_id),
+                project_title = COALESCE(excluded.project_title, media_library.project_title),
+                name = CASE
+                    WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND (excluded.prompt LIKE '%English translation of your image prompt%' OR excluded.name LIKE '%English translation of your image prompt%')
+                    THEN media_library.name
+                    ELSE COALESCE(excluded.name, media_library.name)
+                END,
+                prompt = CASE
+                    WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND excluded.prompt LIKE '%English translation of your image prompt%'
+                    THEN media_library.prompt
+                    WHEN media_library.source IN ('refgen', 'upload', 'scene') AND excluded.source = 'flow' AND media_library.prompt IS NOT NULL AND media_library.prompt != ''
+                    THEN media_library.prompt
+                    ELSE COALESCE(excluded.prompt, media_library.prompt)
+                END,
+                model_name = COALESCE(excluded.model_name, media_library.model_name),
+                aspect_ratio = COALESCE(excluded.aspect_ratio, media_library.aspect_ratio),
+                media_type = COALESCE(excluded.media_type, media_library.media_type),
+                url = COALESCE(excluded.url, media_library.url),
+                thumb = COALESCE(excluded.thumb, media_library.thumb),
+                local_path = COALESCE(excluded.local_path, media_library.local_path),
+                is_cached = MAX(excluded.is_cached, media_library.is_cached),
+                source = COALESCE(media_library.source, excluded.source),
+                updated_at = excluded.updated_at
+            """,
+            (
+                media_id, project_id, project_title, name, prompt, model_name,
+                aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
+                now, now
+            )
+        )
+        await db.commit()
+    return await _get_with_db(db, "media_library", "media_id", media_id)
+
+
+async def batch_upsert_media_library(items: list[dict]) -> int:
+    if not items:
+        return 0
+    db = await get_db()
+    now = _now()
+    count = 0
+    async with _db_lock:
+        for item in items:
+            mid = item.get("media_id") or item.get("mediaKey")
+            if not mid:
+                continue
+            await db.execute(
+                """INSERT INTO media_library (
+                    media_id, project_id, project_title, name, prompt, model_name,
+                    aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
+                    created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(media_id) DO UPDATE SET
+                    project_id = COALESCE(excluded.project_id, media_library.project_id),
+                    project_title = COALESCE(excluded.project_title, media_library.project_title),
+                    name = CASE
+                        WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND (excluded.prompt LIKE '%English translation of your image prompt%' OR excluded.name LIKE '%English translation of your image prompt%')
+                        THEN media_library.name
+                        ELSE COALESCE(excluded.name, media_library.name)
+                    END,
+                    prompt = CASE
+                        WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND excluded.prompt LIKE '%English translation of your image prompt%'
+                        THEN media_library.prompt
+                        WHEN media_library.source IN ('refgen', 'upload', 'scene') AND excluded.source = 'flow' AND media_library.prompt IS NOT NULL AND media_library.prompt != ''
+                        THEN media_library.prompt
+                        ELSE COALESCE(excluded.prompt, media_library.prompt)
+                    END,
+                    model_name = COALESCE(excluded.model_name, media_library.model_name),
+                    aspect_ratio = COALESCE(excluded.aspect_ratio, media_library.aspect_ratio),
+                    media_type = COALESCE(excluded.media_type, media_library.media_type),
+                    url = COALESCE(excluded.url, media_library.url),
+                    thumb = COALESCE(excluded.thumb, media_library.thumb),
+                    local_path = COALESCE(excluded.local_path, media_library.local_path),
+                    is_cached = MAX(excluded.is_cached, media_library.is_cached),
+                    source = COALESCE(media_library.source, excluded.source),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    mid,
+                    item.get("project_id"),
+                    item.get("project_title"),
+                    item.get("name"),
+                    item.get("prompt"),
+                    item.get("model_name") or item.get("modelName"),
+                    item.get("aspect_ratio") or item.get("aspectRatio"),
+                    item.get("media_type") or item.get("mediaType") or "image",
+                    item.get("url"),
+                    item.get("thumb"),
+                    item.get("local_path"),
+                    int(bool(item.get("is_cached"))),
+                    item.get("source") or "flow",
+                    item.get("created_at") or item.get("createTime") or now,
+                    now
+                )
+            )
+            count += 1
+        await db.commit()
+    return count
+
+
+async def list_media_library(
+    project_id: str = None,
+    is_cached: int = None,
+    media_type: str = None,
+    search: str = None,
+    sort_by: str = "created_at",
+    order: str = "desc",
+    limit: int = 60,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    db = await get_db()
+    conditions = []
+    params = []
+
+    if project_id:
+        conditions.append("project_id = ?")
+        params.append(project_id)
+    if is_cached is not None:
+        conditions.append("is_cached = ?")
+        params.append(int(is_cached))
+    if media_type:
+        conditions.append("media_type = ?")
+        params.append(media_type)
+    if search:
+        conditions.append("(name LIKE ? OR prompt LIKE ? OR project_title LIKE ?)")
+        term = f"%{search}%"
+        params.extend([term, term, term])
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    # Count total
+    count_cur = await db.execute(f"SELECT COUNT(*) FROM media_library {where_clause}", tuple(params))
+    total = (await count_cur.fetchone())[0]
+
+    # Determine sorting
+    sort_col = "created_at"
+    if sort_by in ("created_at", "updated_at", "name", "project_title", "media_id"):
+        sort_col = sort_by
+
+    sort_dir = "ASC" if (order or "").lower() == "asc" else "DESC"
+    order_clause = f"ORDER BY {sort_col} {sort_dir}, updated_at DESC"
+
+    # Select items
+    query = f"SELECT * FROM media_library {where_clause} {order_clause} LIMIT ? OFFSET ?"
+    item_params = (*params, limit, offset)
+    cur = await db.execute(query, item_params)
+    rows = [dict(r) for r in await cur.fetchall()]
+
+    return rows, total
+
+
+async def get_media_library_item(media_id: str) -> dict | None:
+    return await _get("media_library", "media_id", media_id)
+
+
+async def update_media_library_item(media_id: str, **kw) -> dict | None:
+    return await _update("media_library", "media_id", media_id, **kw)
+
+
+async def delete_media_library_item(media_id: str) -> bool:
+    return await _delete("media_library", "media_id", media_id)
+
+
+async def get_media_library_stats() -> dict:
+    db = await get_db()
+    cur = await db.execute("""
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN is_cached = 1 THEN 1 ELSE 0 END) as cached_count,
+            SUM(CASE WHEN is_cached = 0 THEN 1 ELSE 0 END) as uncached_count,
+            COUNT(DISTINCT project_id) as project_count
+        FROM media_library
+    """)
+    row = await cur.fetchone()
+    if row:
+        return {
+            "total": row[0] or 0,
+            "cached_count": row[1] or 0,
+            "uncached_count": row[2] or 0,
+            "project_count": row[3] or 0,
+        }
+    return {"total": 0, "cached_count": 0, "uncached_count": 0, "project_count": 0}
+
