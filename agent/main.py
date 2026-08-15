@@ -38,7 +38,18 @@ from agent.services.media_sync import start_periodic_sync, stop_periodic_sync
 from agent.services.event_bus import event_bus
 from agent.sdk import init_sdk
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+LOG_FILE = Path(__file__).parent.parent / "flowkit_server.log"
+_file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        _file_handler,
+    ]
+)
 logger = logging.getLogger(__name__)
 
 

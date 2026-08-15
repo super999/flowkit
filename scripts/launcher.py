@@ -288,33 +288,154 @@ def action_restart_server():
     action_start_server()
 
 
-def action_view_logs():
+def _print_log_line(line: str):
+    """Format and colorize a single log line."""
+    if not line:
+        return
+    if " [ERROR] " in line or " ERROR " in line or " Traceback " in line or "Error: " in line:
+        print(f"{Fore.RED}{line}{Style.RESET_ALL}")
+    elif " [WARNING] " in line or " WARNING " in line:
+        print(f"{Fore.YELLOW}{line}{Style.RESET_ALL}")
+    elif " [INFO] " in line or " INFO: " in line:
+        if "Extension" in line or "Flow key" in line or "WebSocket" in line:
+            print(f"{Fore.GREEN}{line}{Style.RESET_ALL}")
+        elif "HTTP" in line or "GET " in line or "POST " in line:
+            print(f"{Fore.WHITE}{line}{Style.RESET_ALL}")
+        else:
+            print(f"{Style.DIM}{line[:24]}{Style.RESET_ALL} {line[24:]}" if len(line) > 24 else line)
+    else:
+        print(line)
+
+
+def action_tail_logs():
+    """Live tail -f log follower. Follows flowkit_server.log until user presses Q or ESC."""
+    log_path = PROJECT_ROOT / "flowkit_server.log"
+    sys.stdout.write("\033[2J\033[H\033[?25h")
+    sys.stdout.flush()
+
+    print(f"{Fore.CYAN}========================================================================{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}🚀 FlowKit 实时日志追踪 (tail -f){Style.RESET_ALL}")
+    print(f"📁 日志路径: {log_path.resolve()}")
+    print(f"⌨️  操作提示: 按 {Fore.YELLOW}[Q]{Style.RESET_ALL} 或 {Fore.YELLOW}[ESC]{Style.RESET_ALL} 退出并返回主菜单 | 按 {Fore.YELLOW}[C]{Style.RESET_ALL} 清屏")
+    print(f"{Fore.CYAN}========================================================================{Style.RESET_ALL}\n")
+
+    if not log_path.exists():
+        log_path.touch()
+
+    # Print recent history (up to 30 lines)
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="ignore")
+        lines = content.splitlines()
+        for l in (lines[-30:] if len(lines) > 30 else lines):
+            _print_log_line(l)
+    except Exception as e:
+        print(f"{Fore.RED}读取历史日志失败: {e}{Style.RESET_ALL}")
+
+    # Enter non-blocking tail loop
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            f.seek(0, os.SEEK_END)
+            last_pos = f.tell()
+
+            while True:
+                # 1. Non-blocking key check
+                if sys.platform == "win32":
+                    import msvcrt
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getch()
+                        if ch in (b"\x00", b"\xe0"):
+                            msvcrt.getch()  # consume scan code
+                        elif ch in (b"q", b"Q", b"\x1b", b"\x03"):  # q, Q, ESC, Ctrl+C
+                            break
+                        elif ch in (b"c", b"C"):
+                            sys.stdout.write("\033[2J\033[H")
+                            print(f"{Fore.CYAN}--- 已清屏 (实时日志追踪中，按 [Q] 返回菜单) ---{Style.RESET_ALL}\n")
+                            sys.stdout.flush()
+                else:
+                    import select
+                    r, _, _ = select.select([sys.stdin], [], [], 0)
+                    if r:
+                        ch = sys.stdin.read(1)
+                        if ch in ("q", "Q", "\x1b", "\x03"):
+                            break
+                        elif ch in ("c", "C"):
+                            sys.stdout.write("\033[2J\033[H")
+                            sys.stdout.flush()
+
+                # 2. Read new log lines
+                line = f.readline()
+                if line:
+                    _print_log_line(line.rstrip("\r\n"))
+                    last_pos = f.tell()
+                else:
+                    # Check for file truncation/recreation
+                    try:
+                        cur_size = log_path.stat().st_size
+                        if cur_size < last_pos:
+                            f.seek(0, os.SEEK_SET)
+                            last_pos = 0
+                    except Exception:
+                        pass
+                    time.sleep(0.08)
+
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"\n{Fore.RED}日志跟踪发生异常: {e}{Style.RESET_ALL}")
+        time.sleep(1)
+
+    print(f"\n{Fore.CYAN}正在返回 FlowKit 主菜单...{Style.RESET_ALL}")
+    time.sleep(0.3)
+
+
+def action_diagnostics():
+    """View detailed health diagnostics and system stats."""
     healthy, data = is_server_healthy(force=True)
     pid = get_server_pid()
-    print(f"\n{Fore.CYAN}--- FlowKit 系统状态与日志 ---{Style.RESET_ALL}")
-    print(f"进程 PID: {pid if pid else '未运行/未知'}")
-    if healthy:
-        print(f"服务状态: {Fore.GREEN}正常 (OK){Style.RESET_ALL}")
-        ext_conn = data.get("extension_connected") if data else False
-        print(f"Chrome 扩展: {Fore.GREEN + '已连接' if ext_conn else Fore.RED + '未连接'}{Style.RESET_ALL}")
-        if data and "ws" in data:
-            print(f"WebSocket 统计: {data['ws']}")
-    else:
-        print(f"服务状态: {Fore.RED}无法连接 8100 端口{Style.RESET_ALL}")
 
-    log_path = PROJECT_ROOT / "flowkit_server.log"
-    print(f"\n{Fore.CYAN}--- 最近 25 行服务日志 ({log_path.name}) ---{Style.RESET_ALL}")
-    if not log_path.exists():
-        print(f"{Fore.YELLOW}暂无日志文件。{Style.RESET_ALL}")
-    else:
-        try:
-            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            for line in (lines[-25:] if len(lines) > 25 else lines):
-                print(line)
-        except Exception as e:
-            print(f"{Fore.RED}读取日志出错: {e}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}===================================================={Style.RESET_ALL}")
+    print(f"{Fore.CYAN}            FlowKit 服务深度健康与统计诊断             {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}===================================================={Style.RESET_ALL}")
 
-    print("\n按任意键返回主菜单...")
+    print(f"\n1. 基础进程与网络状态:")
+    print(f"   - 8100 端口服务 PID: {Fore.GREEN + str(pid) if pid else Fore.RED + '未运行'}{Style.RESET_ALL}")
+    pids_8100 = get_pids_by_port(PORT)
+    print(f"   - 8100 监听进程列表: {pids_8100 if pids_8100 else '无'}")
+    pids_9223 = get_pids_by_port(9223)
+    print(f"   - 9223 (WebSocket) 监听: {Fore.GREEN + str(pids_9223) if pids_9223 else Fore.YELLOW + '未监听'}{Style.RESET_ALL}")
+
+    print(f"\n2. 健康检查 (/health) 响应:")
+    if healthy and data:
+        print(f"   - HTTP 状态码: {Fore.GREEN}200 OK{Style.RESET_ALL}")
+        print(f"   - 服务版本: {data.get('version', '未知')}")
+        ext_conn = data.get("extension_connected", False)
+        ext_color = Fore.GREEN if ext_conn else Fore.RED
+        print(f"   - Chrome 扩展连接: {ext_color}{'已连接 (OK)' if ext_conn else '未连接 (请确认扩展是否开启)'}{Style.RESET_ALL}")
+        if "ws" in data:
+            ws_info = data["ws"]
+            print(f"   - WebSocket 活跃连接: {ws_info.get('active_connections', 0)} (已认证: {ws_info.get('authenticated_connections', 0)})")
+            print(f"   - WebSocket 运行时间: {ws_info.get('uptime_s', 0)} 秒")
+    else:
+        print(f"   - HTTP 状态: {Fore.RED}无法连接至 http://127.0.0.1:{PORT}/health{Style.RESET_ALL}")
+
+    print(f"\n3. 本地数据库与缓存状态:")
+    db_path = PROJECT_ROOT / "flow_agent.db"
+    if db_path.exists():
+        size_mb = db_path.stat().st_size / (1024 * 1024)
+        print(f"   - 数据库文件 (flow_agent.db): {Fore.GREEN}存在 ({size_mb:.2f} MB){Style.RESET_ALL}")
+    else:
+        print(f"   - 数据库文件: {Fore.YELLOW}未创建{Style.RESET_ALL}")
+
+    cache_dir = PROJECT_ROOT / "output" / "_cache"
+    if cache_dir.exists():
+        cache_files = list(cache_dir.glob("*.*"))
+        total_size_mb = sum(f.stat().st_size for f in cache_files) / (1024 * 1024)
+        print(f"   - 媒体本地缓存目录: {len(cache_files)} 个文件 ({total_size_mb:.2f} MB)")
+    else:
+        print(f"   - 媒体本地缓存目录: 未创建")
+
+    print(f"\n{Fore.CYAN}----------------------------------------------------{Style.RESET_ALL}")
+    print("按任意键返回主菜单...")
     get_key_input()
 
 
@@ -362,10 +483,11 @@ COMMANDS = [
     {"key": "1", "label": "启动 FlowKit 服务 (后端 + 控制台)", "action": action_start_server},
     {"key": "2", "label": "重启 FlowKit 服务", "action": action_restart_server},
     {"key": "3", "label": "停止 FlowKit 服务 (强力释放端口)", "action": action_stop_server},
-    {"key": "4", "label": "查看 服务健康状态与最新日志", "action": action_view_logs},
-    {"key": "5", "label": "在浏览器中打开 Web 控制台", "action": action_open_dashboard},
-    {"key": "6", "label": "重新编译前端静态资源 (npm run build)", "action": action_build_frontend},
-    {"key": "7", "label": "运行 Pytest 单元测试", "action": action_run_tests},
+    {"key": "4", "label": "实时追踪服务日志 (tail -f 模式)", "action": action_tail_logs},
+    {"key": "5", "label": "查看详细服务健康与统计诊断", "action": action_diagnostics},
+    {"key": "6", "label": "在浏览器中打开 Web 控制台", "action": action_open_dashboard},
+    {"key": "7", "label": "重新编译前端静态资源 (npm run build)", "action": action_build_frontend},
+    {"key": "8", "label": "运行 Pytest 单元测试", "action": action_run_tests},
 ]
 
 
