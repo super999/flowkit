@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import websockets
 from pathlib import Path
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -212,6 +212,28 @@ async def serve_dashboard():
     if index_file.exists():
         return FileResponse(str(index_file))
     return {"status": "ok", "message": "Dashboard index.html not found"}
+
+
+@app.get("/{full_path:path}")
+async def serve_spa_fallback(full_path: str):
+    """Catch-all route to serve React SPA index.html on direct URL entry or F5 refresh."""
+    # Never intercept backend endpoints or static mounts
+    if (
+        full_path.startswith("api/")
+        or full_path.startswith("ws/")
+        or full_path.startswith("output/")
+        or full_path.startswith("assets/")
+        or full_path.startswith("static/")
+        or full_path == "health"
+    ):
+        raise HTTPException(404, "Not Found")
+
+    if (REACT_DIST_DIR / "index.html").exists():
+        return FileResponse(str(REACT_DIST_DIR / "index.html"))
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+    raise HTTPException(404, "Dashboard index.html not found")
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────
