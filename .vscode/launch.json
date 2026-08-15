@@ -2,16 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Start Dashboard Dev Server",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "cwd": "${workspaceFolder}/dashboard",
-      "console": "integratedTerminal"
-    },
-    {
-      "name": "Run FlowKit Backend Server",
+      "name": "Debug FlowKit Server",
       "type": "python",
       "request": "launch",
       "module": "agent.main",

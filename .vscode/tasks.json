@@ -2,21 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Start Dashboard Dev Server (Port 8180)",
-      "type": "shell",
-      "command": "npm run dev",
-      "options": {
-        "cwd": "${workspaceFolder}/dashboard"
-      },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "new",
-        "focus": true
-      }
-    },
-    {
-      "label": "Start FlowKit Backend Server",
+      "label": "Start FlowKit Server",
       "type": "shell",
       "command": "D:\\python_envs\\flowkit\\python.exe -m agent.main",
       "options": {
@@ -29,6 +15,20 @@
       "presentation": {
         "reveal": "always",
         "panel": "new"
+      }
+    },
+    {
+      "label": "Open FlowKit Console (TUI)",
+      "type": "shell",
+      "command": "D:\\python_envs\\flowkit\\python.exe scripts/launcher.py",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true
       }
     }
   ]

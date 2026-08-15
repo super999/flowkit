@@ -26,4 +26,4 @@ ds-bundle/
 extension/_metadata/
 dashboard/dist/
 *.log
-.flowkit.pid
+*.pid

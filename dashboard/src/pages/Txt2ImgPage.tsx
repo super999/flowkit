@@ -460,7 +460,7 @@ export default function Txt2ImgPage() {
                     </a>
                   </div>
                   <div className="p-2 space-y-1">
-                    <p className="text-[10px] text-zinc-300 font-semibold line-clamp-2" title={scene.prompt}>
+                    <p className="text-[10px] text-zinc-300 font-semibold line-clamp-2" title={scene.prompt ?? undefined}>
                       {scene.prompt}
                     </p>
                     <p className="text-[8px] text-zinc-500">
