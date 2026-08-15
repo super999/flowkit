@@ -358,7 +358,23 @@ export default function ReferenceLibraryPage() {
                             src={item.thumb}
                             alt={item.name}
                             className="w-full h-full object-cover"
-                            onError={(e) => { (e.target as HTMLElement).style.visibility = 'hidden' }}
+                            referrerPolicy="no-referrer"
+                            onError={(e) => {
+                              const target = e.currentTarget as HTMLImageElement
+                              if (!target.dataset.triedProxy && item.mediaId) {
+                                target.dataset.triedProxy = '1'
+                                target.src = `/api/flow/media/proxy?media_id=${item.mediaId}&url=${encodeURIComponent(item.thumb)}`
+                              } else {
+                                target.style.display = 'none'
+                                const parent = target.parentElement
+                                if (parent && !parent.querySelector('.expired-hint')) {
+                                  const div = document.createElement('div')
+                                  div.className = 'expired-hint text-[8px] text-zinc-500 text-center p-1'
+                                  div.innerText = '已过期'
+                                  parent.appendChild(div)
+                                }
+                              }
+                            }}
                           />
                         ) : (
                           <span className="text-[9px]" style={{ color: 'var(--muted)' }}>无缩略图</span>

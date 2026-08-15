@@ -55,6 +55,7 @@ ENDPOINTS = {
 # ─── Output Directories ─────────────────────────────────────
 OUTPUT_DIR = BASE_DIR / "output"
 SHARED_OUTPUT_DIR = OUTPUT_DIR / "_shared"
+MEDIA_CACHE_DIR = OUTPUT_DIR / "_cache"
 TTS_TEMPLATES_DIR = SHARED_OUTPUT_DIR / "tts_templates"
 MUSIC_OUTPUT_DIR = SHARED_OUTPUT_DIR / "music"
 

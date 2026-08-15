@@ -24,8 +24,7 @@ const LIGHTING_PRESETS = [
 const IMG_CACHE_NAME = 'flowkit-img'
 
 // Local image cache: stores generated images by media_id (stable) so previews
-// don't re-download from the cloud on every visit. Signed URLs rotate hourly —
-// the cache key must NOT be the URL itself.
+// don't re-download from the cloud on every visit. Signed URLs rotate hourly.
 function CachedImage({ mediaId, src, alt, className, onClick, onError }: {
   mediaId?: string | null
   src?: string | null
@@ -34,38 +33,91 @@ function CachedImage({ mediaId, src, alt, className, onClick, onError }: {
   onClick?: () => void
   onError?: (e: React.SyntheticEvent<HTMLImageElement>) => void
 }) {
-  const [displaySrc, setDisplaySrc] = useState<string | null | undefined>(src)
+  const [displaySrc, setDisplaySrc] = useState<string | null | undefined>(() => {
+    if (src?.startsWith('/output/')) return src
+    return src
+  })
+  const [hasFailed, setHasFailed] = useState(false)
+  const [triedProxy, setTriedProxy] = useState(false)
 
   useEffect(() => {
+    setHasFailed(false)
+    setTriedProxy(false)
     let revokeUrl: string | null = null
     let cancelled = false
-    const key = `https://local.flowkit.cache/${mediaId || 'none'}`
+
     async function load() {
-      if (!mediaId || !src) { setDisplaySrc(src); return }
-      try {
-        const cache = await caches.open(IMG_CACHE_NAME)
-        const hit = await cache.match(key)
-        if (hit) {
-          const blobUrl = URL.createObjectURL(await hit.blob())
-          revokeUrl = blobUrl
-          if (!cancelled) setDisplaySrc(blobUrl)
-          return
-        }
-        const resp = await fetch(src)
-        if (!resp.ok) { if (!cancelled) setDisplaySrc(src); return }
-        await cache.put(key, resp.clone())
-        const blobUrl = URL.createObjectURL(await resp.blob())
-        revokeUrl = blobUrl
-        if (!cancelled) setDisplaySrc(blobUrl)
-      } catch {
-        if (!cancelled) setDisplaySrc(src)
+      if (!src && !mediaId) {
+        setDisplaySrc(null)
+        return
       }
+
+      // 1. Direct local output path
+      if (src && src.startsWith('/output/')) {
+        setDisplaySrc(src)
+        return
+      }
+
+      // 2. Try browser cache storage by mediaId
+      if (mediaId) {
+        try {
+          const cache = await caches.open(IMG_CACHE_NAME)
+          const key = `https://local.flowkit.cache/${mediaId}`
+          const hit = await cache.match(key)
+          if (hit) {
+            const blobUrl = URL.createObjectURL(await hit.blob())
+            revokeUrl = blobUrl
+            if (!cancelled) setDisplaySrc(blobUrl)
+            return
+          }
+        } catch {
+          // ignore cache errors
+        }
+      }
+
+      // 3. Fallback to src or local proxy if src is obviously missing
+      if (!cancelled) setDisplaySrc(src || (mediaId ? `/api/flow/media/proxy?media_id=${mediaId}` : null))
     }
+
     load()
-    return () => { cancelled = true; if (revokeUrl) URL.revokeObjectURL(revokeUrl) }
+    return () => {
+      cancelled = true
+      if (revokeUrl) URL.revokeObjectURL(revokeUrl)
+    }
   }, [mediaId, src])
 
-  return <img src={displaySrc || undefined} alt={alt || ''} className={className} onClick={onClick} onError={onError} referrerPolicy="no-referrer" />
+  const handleImgError = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    // If not tried proxy yet and we have mediaId or src, fallback to backend proxy
+    if (!triedProxy && (mediaId || src)) {
+      setTriedProxy(true)
+      const proxyUrl = `/api/flow/media/proxy?${mediaId ? `media_id=${mediaId}&` : ''}${src ? `url=${encodeURIComponent(src)}` : ''}`
+      setDisplaySrc(proxyUrl)
+      return
+    }
+
+    setHasFailed(true)
+    if (onError) onError(e)
+  }
+
+  if (hasFailed || (!displaySrc && !mediaId)) {
+    return (
+      <div className={`flex flex-col items-center justify-center bg-zinc-900/80 text-zinc-500 text-[10px] p-2 text-center select-none ${className || ''}`}>
+        <span className="text-base mb-1">🖼️</span>
+        <span>图片已过期/未缓存</span>
+      </div>
+    )
+  }
+
+  return (
+    <img
+      src={displaySrc || undefined}
+      alt={alt || ''}
+      className={className}
+      onClick={onClick}
+      onError={handleImgError}
+      referrerPolicy="no-referrer"
+    />
+  )
 }
 
 export default function ImageStudioPage() {

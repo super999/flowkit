@@ -435,3 +435,23 @@ async def resolve_media_batch(body: ResolveMediaBatchRequest):
     resolved = await client.resolve_media_urls(body.media_ids)
     return {"resolved": resolved}
 
+
+@router.get("/media/proxy")
+async def proxy_media_image(media_id: Optional[str] = None, url: Optional[str] = None):
+    """Serve cached image locally, or fetch, cache and serve on demand."""
+    from fastapi.responses import FileResponse
+    from agent.services.media_cache import get_cached_image_path, cache_media_image
+
+    if media_id:
+        cached_p = get_cached_image_path(media_id)
+        if cached_p:
+            return FileResponse(str(cached_p), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    # Fetch and cache
+    if media_id or url:
+        cached_p = await cache_media_image(media_id or "", url)
+        if cached_p and cached_p.exists():
+            return FileResponse(str(cached_p), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    raise HTTPException(404, "Media not found or unable to fetch")
+

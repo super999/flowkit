@@ -20,12 +20,21 @@ class RefGenCreate(BaseModel):
 
 @router.get("/results")
 async def list_results(project_id: str):
-    return await crud.list_refgen_results(project_id)
+    from agent.services.media_cache import get_cached_image_url, trigger_background_cache
+    rows = await crud.list_refgen_results(project_id)
+    for r in rows:
+        cached_url = get_cached_image_url(r.get("media_id", ""))
+        if cached_url:
+            r["url"] = cached_url
+        else:
+            trigger_background_cache(r.get("media_id", ""), r.get("url", ""))
+    return rows
 
 
 @router.post("/results")
 async def create_result(body: RefGenCreate):
-    return await crud.create_refgen_result(
+    from agent.services.media_cache import trigger_background_cache
+    res = await crud.create_refgen_result(
         project_id=body.project_id,
         media_id=body.media_id,
         url=body.url,
@@ -34,6 +43,8 @@ async def create_result(body: RefGenCreate):
         model=body.model,
         duration_ms=body.duration_ms,
     )
+    trigger_background_cache(body.media_id, body.url)
+    return res
 
 
 @router.delete("/results/{rid}")
