@@ -266,6 +266,47 @@ export default function ImageStudioPage() {
     }
   }
 
+  // Scene manual refresh state
+  const [refreshingSceneId, setRefreshingSceneId] = useState<string | null>(null)
+  const [refreshingAllScenes, setRefreshingAllScenes] = useState(false)
+
+  const handleRefreshScene = async (scene: Scene) => {
+    const mid = scene.vertical_image_media_id || scene.horizontal_image_media_id
+    if (!mid) {
+      alert('该分镜尚未生成图片 media_id')
+      return
+    }
+    setRefreshingSceneId(scene.id)
+    try {
+      await fetchAPI('/api/flow/media/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ media_ids: [mid] }),
+      }).catch(() => null)
+      await fetch(`/api/flow/media/proxy?media_id=${mid}&t=${Date.now()}`).catch(() => {})
+      if (selectedProjectId) await loadProjectAssets(selectedProjectId)
+    } finally {
+      setRefreshingSceneId(null)
+    }
+  }
+
+  const handleRefreshAllScenes = async () => {
+    if (!scenes.length) return
+    setRefreshingAllScenes(true)
+    try {
+      const mids = scenes.map(s => s.vertical_image_media_id || s.horizontal_image_media_id).filter(Boolean) as string[]
+      if (mids.length > 0) {
+        await fetchAPI('/api/flow/media/resolve', {
+          method: 'POST',
+          body: JSON.stringify({ media_ids: mids }),
+        }).catch(() => null)
+        await Promise.all(mids.map(mid => fetch(`/api/flow/media/proxy?media_id=${mid}&t=${Date.now()}`).catch(() => {})))
+      }
+      if (selectedProjectId) await loadProjectAssets(selectedProjectId)
+    } finally {
+      setRefreshingAllScenes(false)
+    }
+  }
+
   // Load project list and initial project
   const loadProjects = async () => {
     try {
@@ -1700,12 +1741,36 @@ export default function ImageStudioPage() {
                 </div>
               )}
 
+              {/* Empty state prompt specifically when on characters tab with 0 characters */}
+              {activeTab === 'characters' && characters.length === 0 && (
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: 'var(--accent)' }}>
+                    <span>👥 角色/实体参考图 (0)</span>
+                  </span>
+                  <div className="p-4 text-center text-xs border rounded-lg border-dashed flex flex-col items-center gap-1" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
+                    <span>当前项目暂无角色/实体参考图。</span>
+                    <span className="text-[11px]">请在左侧填写角色外观描述，点击「🎨 创建实体并提交参考图」即可生成！</span>
+                  </div>
+                </div>
+              )}
+
               {/* Scenes Video & Image Grid Section */}
               {activeTab !== 'refgen' && (
               <div className="flex flex-col gap-2 mt-2">
-                <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: 'var(--cyan)' }}>
-                  <span>🎬 分镜画面 ({scenes.length})</span>
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: 'var(--cyan)' }}>
+                    <span>🎬 分镜画面 ({scenes.length})</span>
+                  </span>
+                  <button
+                    onClick={handleRefreshAllScenes}
+                    disabled={refreshingAllScenes || scenes.length === 0}
+                    className="text-[10px] px-2 py-0.5 rounded border hover:border-cyan-400 text-cyan-400 transition-colors disabled:opacity-50 flex items-center gap-1"
+                    style={{ borderColor: 'var(--border)' }}
+                    title="批量重新拉取并本地缓存所有分镜的最新画面"
+                  >
+                    <span>{refreshingAllScenes ? '⏳ 正在刷新...' : '🔄 刷新所有分镜画面'}</span>
+                  </button>
+                </div>
 
                 {scenes.length === 0 ? (
                   <div className="p-8 text-center text-xs border rounded-lg border-dashed" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
@@ -1725,8 +1790,18 @@ export default function ImageStudioPage() {
                         <div key={s.id} className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-bold" style={{ color: 'var(--cyan)' }}>Scene #{s.display_order || globalIdx+1}</span>
-                            <div className="flex gap-1">
+                            <div className="flex gap-1 items-center">
                               <Badge variant="outline" className="text-[9px]">{status}</Badge>
+                              {imageMediaId && (
+                                <button
+                                  onClick={() => handleRefreshScene(s)}
+                                  disabled={refreshingSceneId === s.id}
+                                  className="text-[11px] px-1.5 py-0.5 rounded border hover:border-cyan-400 transition-colors disabled:opacity-50"
+                                  title="重新拉取并本地缓存此分镜画面"
+                                >
+                                  {refreshingSceneId === s.id ? '⏳' : '🔄'}
+                                </button>
+                              )}
                               {imageUrl && (
                                 <div className="flex gap-0.5 items-center">
                                   {(['1K', '2K', '4K'] as const).map(res => (

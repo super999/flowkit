@@ -22,6 +22,16 @@ def _scene_to_flat(sdk_scene) -> dict:
     flat["character_names"] = sdk_scene.character_names
     flat["created_at"] = sdk_scene.created_at
     flat["updated_at"] = sdk_scene.updated_at
+
+    from agent.services.media_cache import get_cached_image_url, trigger_background_cache
+    for prefix in ("vertical", "horizontal"):
+        mid = flat.get(f"{prefix}_image_media_id")
+        if mid:
+            cached = get_cached_image_url(mid)
+            if cached:
+                flat[f"{prefix}_image_url"] = cached
+            elif flat.get(f"{prefix}_image_url"):
+                trigger_background_cache(mid, flat[f"{prefix}_image_url"])
     return flat
 
 
