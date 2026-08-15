@@ -120,9 +120,215 @@ function CachedImage({ mediaId, src, alt, className, onClick, onError }: {
   )
 }
 
+interface MediaDetailInfo {
+  title?: string | null
+  src: string
+  mediaId?: string | null
+  prompt?: string | null
+  model?: string | null
+  aspect?: string | null
+  durationMs?: number | null
+  time?: string | null
+  status?: string | null
+  entityType?: string | null
+  sceneOrder?: number | null
+}
+
+function ImageDetailModal({
+  info,
+  onClose,
+  onDownloadAtResolution,
+}: {
+  info: MediaDetailInfo
+  onClose: () => void
+  onDownloadAtResolution: (url: string, mediaId: string | null | undefined, baseName: string, res: '1K' | '2K' | '4K', key: string) => Promise<void>
+}) {
+  const [copiedPrompt, setCopiedPrompt] = useState(false)
+  const [copiedMediaId, setCopiedMediaId] = useState(false)
+
+  // Close on ESC key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  const copyText = (text: string, type: 'prompt' | 'mediaId') => {
+    navigator.clipboard.writeText(text)
+    if (type === 'prompt') {
+      setCopiedPrompt(true)
+      setTimeout(() => setCopiedPrompt(false), 2000)
+    } else {
+      setCopiedMediaId(true)
+      setTimeout(() => setCopiedMediaId(false), 2000)
+    }
+  }
+
+  const isLocalCached = info.src.startsWith('/output/')
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 md:p-6 bg-black/80 backdrop-blur-md animate-in fade-in duration-150"
+      onClick={onClose}
+    >
+      <div
+        className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl max-w-5xl w-full h-[88vh] max-h-[850px] flex flex-col md:flex-row relative"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Left: Large Image Stage */}
+        <div className="flex-1 flex flex-col items-center justify-between bg-black/60 p-4 relative overflow-hidden border-b md:border-b-0 md:border-r border-zinc-800/80">
+          <div className="w-full flex-1 flex items-center justify-center min-h-0 overflow-hidden">
+            <CachedImage
+              mediaId={info.mediaId}
+              src={info.src}
+              alt={info.title || 'detail'}
+              className="max-w-full max-h-full object-contain rounded-lg shadow-lg cursor-zoom-in"
+              onClick={() => info.src && window.open(info.src, '_blank')}
+            />
+          </div>
+
+          {/* Bottom Download Bar */}
+          <div className="w-full pt-3 mt-2 border-t border-zinc-800/60 flex items-center justify-between flex-wrap gap-2 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-zinc-400">下载分辨率:</span>
+              {(['1K', '2K', '4K'] as const).map(res => (
+                <button
+                  key={res}
+                  onClick={() => onDownloadAtResolution(info.src, info.mediaId, `detail_${info.mediaId?.slice(0, 8) || 'img'}`, res, 'modal')}
+                  className="text-[11px] px-2 py-1 rounded border border-zinc-700 bg-zinc-900/80 text-zinc-200 hover:border-accent hover:text-white transition-colors"
+                >
+                  ⬇️ {res}
+                </button>
+              ))}
+            </div>
+            {info.src && (
+              <button
+                onClick={() => window.open(info.src, '_blank')}
+                className="text-[11px] px-2.5 py-1 rounded border border-zinc-700 bg-zinc-900/80 text-zinc-300 hover:border-accent hover:text-white transition-colors flex items-center gap-1"
+              >
+                <span>🔗 新标签页打开原图</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Metadata Panel */}
+        <div className="w-full md:w-80 lg:w-96 p-5 flex flex-col gap-4 overflow-y-auto bg-zinc-900/60">
+          <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+            <div className="flex items-center gap-2">
+              <span className="text-base font-bold text-zinc-100">{info.title || '元数据信息'}</span>
+              {info.status && (
+                <Badge variant="outline" className="text-[10px]">{info.status}</Badge>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="text-zinc-400 hover:text-zinc-100 w-7 h-7 rounded-full bg-zinc-800/60 flex items-center justify-center text-sm transition-colors"
+              title="关闭 (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Prompt Section */}
+          {info.prompt && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-zinc-300">画面提示词 (Prompt)</span>
+                <button
+                  onClick={() => copyText(info.prompt!, 'prompt')}
+                  className="text-[10px] px-1.5 py-0.5 rounded border border-zinc-700 hover:border-accent text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  {copiedPrompt ? '✓ 已复制' : '📋 复制'}
+                </button>
+              </div>
+              <div className="p-2.5 rounded-lg bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-300 leading-relaxed max-h-40 overflow-y-auto select-text whitespace-pre-wrap">
+                {info.prompt}
+              </div>
+            </div>
+          )}
+
+          {/* Metadata Key-Values */}
+          <div className="flex flex-col gap-2.5 text-xs">
+            <span className="font-semibold text-zinc-300">生成参数与详情</span>
+
+            {/* Media ID */}
+            {info.mediaId && (
+              <div className="flex flex-col gap-0.5 p-2 rounded bg-zinc-950/50 border border-zinc-800/60">
+                <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                  <span>Media ID (UUID)</span>
+                  <button
+                    onClick={() => copyText(info.mediaId!, 'mediaId')}
+                    className="text-[9px] hover:text-accent underline"
+                  >
+                    {copiedMediaId ? '已复制' : '复制'}
+                  </button>
+                </div>
+                <span className="font-mono text-[10px] text-cyan-400 break-all select-all">{info.mediaId}</span>
+              </div>
+            )}
+
+            {/* Grid metrics */}
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+              {info.sceneOrder !== undefined && (
+                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
+                  <span className="text-[10px] text-zinc-400">分镜序号</span>
+                  <span className="font-semibold text-cyan-300">Scene #{info.sceneOrder}</span>
+                </div>
+              )}
+              {info.entityType && (
+                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
+                  <span className="text-[10px] text-zinc-400">实体类型</span>
+                  <span className="font-semibold text-purple-300">{info.entityType}</span>
+                </div>
+              )}
+              {info.model && (
+                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
+                  <span className="text-[10px] text-zinc-400">生图模型</span>
+                  <span className="font-semibold text-zinc-200">{info.model}</span>
+                </div>
+              )}
+              {info.aspect && (
+                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
+                  <span className="text-[10px] text-zinc-400">画面比例</span>
+                  <span className="font-semibold text-zinc-200">{info.aspect.replace('IMAGE_ASPECT_RATIO_', '')}</span>
+                </div>
+              )}
+              {info.durationMs != null && (
+                <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
+                  <span className="text-[10px] text-zinc-400">生成耗时</span>
+                  <span className="font-semibold text-amber-300">{(info.durationMs / 1000).toFixed(1)}s</span>
+                </div>
+              )}
+              <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
+                <span className="text-[10px] text-zinc-400">缓存状态</span>
+                <span className={`font-semibold ${isLocalCached ? 'text-emerald-400' : 'text-zinc-300'}`}>
+                  {isLocalCached ? '✓ 已本地持久化' : '☁️ 远端 CDN'}
+                </span>
+              </div>
+            </div>
+
+            {info.time && (
+              <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col text-[11px]">
+                <span className="text-[10px] text-zinc-400">创建/生成时间</span>
+                <span className="text-zinc-300 font-mono text-[10px]">{info.time}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ImageStudioPage() {
   const location = useLocation()
   const navigate = useNavigate()
+
+  // Active modal lightbox detail state
+  const [activeMediaDetail, setActiveMediaDetail] = useState<MediaDetailInfo | null>(null)
 
   // Determine active tab from URL path (/studio/scenes, /studio/characters, /studio/batch, /studio/refgen)
   const path = location.pathname
@@ -1559,6 +1765,16 @@ export default function ImageStudioPage() {
                         {pageRefgenResults.map((r, idx) => {
                           const globalIdx = idx + (safeRefgenPage - 1) * refgenPageSize
                           const dlState = downloading?.id === r.id ? downloading.res : null
+                          const openDetail = () => setActiveMediaDetail({
+                            title: `参考图生图 #${r.id.slice(0, 8)}`,
+                            src: r.url,
+                            mediaId: r.mediaId,
+                            prompt: r.prompt,
+                            aspect: r.aspect,
+                            model: refgenModel,
+                            durationMs: r.durationMs,
+                            time: r.time,
+                          })
                           return (
                             <div key={r.id} className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                               <div className="flex items-center justify-between">
@@ -1566,6 +1782,13 @@ export default function ImageStudioPage() {
                                   {r.time}{r.durationMs ? ` · ⏱ 生成 ${(r.durationMs / 1000).toFixed(1)}s` : ''}
                                 </span>
                                 <div className="flex gap-0.5 items-center">
+                                  <button
+                                    onClick={openDetail}
+                                    className="text-[10px] px-1.5 py-0.5 rounded border hover:border-cyan-400 text-cyan-400 transition-colors"
+                                    title="查看高清大图与元数据"
+                                  >
+                                    ℹ️
+                                  </button>
                                   {(['1K', '2K', '4K'] as const).map(res => (
                                     <button
                                       key={res}
@@ -1581,13 +1804,15 @@ export default function ImageStudioPage() {
                                 </div>
                               </div>
                               <div
-                                className="w-full rounded overflow-hidden bg-black flex items-center justify-center border"
+                                className="w-full rounded overflow-hidden bg-black flex items-center justify-center border cursor-pointer group"
                                 style={{
                                   borderColor: 'var(--border)',
                                   aspectRatio: ASPECT_CSS[r.aspect || ''] || '16 / 9',
                                 }}
+                                onClick={openDetail}
+                                title="点击查看高清大图与元数据"
                               >
-                                <CachedImage mediaId={r.mediaId} src={r.url} alt={`refgen-${globalIdx}`} className="w-full h-full object-cover" />
+                                <CachedImage mediaId={r.mediaId} src={r.url} alt={`refgen-${globalIdx}`} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                               </div>
                               <span className="text-[11px] line-clamp-2 leading-relaxed" style={{ color: 'var(--text)' }}>{r.prompt}</span>
                             </div>
@@ -1685,58 +1910,80 @@ export default function ImageStudioPage() {
                   </div>
 
                   <div className="grid grid-cols-3 gap-3">
-                    {characters.map(c => (
-                      <div key={c.id} className="p-2.5 rounded-lg border flex flex-col gap-2 relative group" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold truncate">{c.name}</span>
-                            <div className="flex items-center gap-1">
-                              <Badge variant="outline" className="text-[9px]">{c.entity_type || 'char'}</Badge>
-                              {c.media_id && (
+                    {characters.map(c => {
+                      const openCharDetail = () => c.reference_image_url && setActiveMediaDetail({
+                        title: `角色/实体: ${c.name}`,
+                        src: c.reference_image_url,
+                        mediaId: c.media_id,
+                        prompt: c.image_prompt || c.description,
+                        entityType: c.entity_type,
+                      })
+                      return (
+                        <div key={c.id} className="p-2.5 rounded-lg border flex flex-col gap-2 relative group" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold truncate">{c.name}</span>
+                              <div className="flex items-center gap-1">
+                                <Badge variant="outline" className="text-[9px]">{c.entity_type || 'char'}</Badge>
+                                {c.reference_image_url && (
+                                  <button
+                                    onClick={openCharDetail}
+                                    className="text-[11px] px-1.5 py-0.5 rounded border hover:border-cyan-400 text-cyan-400 transition-colors"
+                                    title="查看大图与元数据"
+                                  >
+                                    ℹ️
+                                  </button>
+                                )}
+                                {c.media_id && (
+                                  <button
+                                    onClick={() => handleRefreshCharacter(c)}
+                                    disabled={refreshingCharId === c.id}
+                                    className="text-[11px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
+                                    title="重新拉取并更新此参考图"
+                                  >
+                                    {refreshingCharId === c.id ? '⏳' : '🔄'}
+                                  </button>
+                                )}
+                                {c.reference_image_url && (
+                                  <button
+                                    onClick={() => downloadImage(c.reference_image_url!, `ref_${c.name}.jpg`)}
+                                    className="text-[11px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors"
+                                    title="下载原图"
+                                  >
+                                    ⬇️
+                                  </button>
+                                )}
                                 <button
-                                  onClick={() => handleRefreshCharacter(c)}
-                                  disabled={refreshingCharId === c.id}
-                                  className="text-[11px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors disabled:opacity-50"
-                                  title="重新拉取并更新此参考图"
+                                  onClick={() => handleDeleteCharacter(c.id)}
+                                  className="text-[11px] px-1.5 py-0.5 rounded border hover:bg-red-500/20 text-red-400 opacity-70 group-hover:opacity-100 transition-opacity"
+                                  title="删除此实体"
                                 >
-                                  {refreshingCharId === c.id ? '⏳' : '🔄'}
+                                  🗑️
                                 </button>
-                              )}
-                              {c.reference_image_url && (
-                                <button
-                                  onClick={() => downloadImage(c.reference_image_url!, `ref_${c.name}.jpg`)}
-                                  className="text-[11px] px-1.5 py-0.5 rounded border hover:border-accent transition-colors"
-                                  title="下载原图"
-                                >
-                                  ⬇️
-                                </button>
-                              )}
-                              <button
-                                onClick={() => handleDeleteCharacter(c.id)}
-                                className="text-[11px] px-1.5 py-0.5 rounded border hover:bg-red-500/20 text-red-400 opacity-70 group-hover:opacity-100 transition-opacity"
-                                title="删除此实体"
-                              >
-                                🗑️
-                              </button>
+                              </div>
                             </div>
+                          <div
+                            className="w-full aspect-square rounded overflow-hidden bg-black flex items-center justify-center border relative cursor-pointer"
+                            style={{ borderColor: 'var(--border)' }}
+                            onClick={openCharDetail}
+                            title="点击查看高清大图与元数据"
+                          >
+                            {c.reference_image_url || c.media_id ? (
+                              <CachedImage
+                                mediaId={c.media_id}
+                                src={c.reference_image_url}
+                                alt={c.name}
+                                className="w-full h-full object-cover rounded group-hover:scale-105 transition-transform"
+                              />
+                            ) : (
+                              <div className="flex flex-col items-center p-2 text-center gap-1">
+                                <span className="text-[10px]" style={{ color: 'var(--yellow)' }}>⚠️ 未生成画面</span>
+                                <span className="text-[9px]" style={{ color: 'var(--muted)' }}>点击右上角🗑️可删除</span>
+                              </div>
+                            )}
                           </div>
-                        <div className="w-full aspect-square rounded overflow-hidden bg-black flex items-center justify-center border relative" style={{ borderColor: 'var(--border)' }}>
-                          {c.reference_image_url || c.media_id ? (
-                            <CachedImage
-                              mediaId={c.media_id}
-                              src={c.reference_image_url}
-                              alt={c.name}
-                              className="w-full h-full object-cover rounded cursor-pointer group-hover:scale-105 transition-transform"
-                              onClick={() => c.reference_image_url && window.open(c.reference_image_url, '_blank')}
-                            />
-                          ) : (
-                            <div className="flex flex-col items-center p-2 text-center gap-1">
-                              <span className="text-[10px]" style={{ color: 'var(--yellow)' }}>⚠️ 未生成画面</span>
-                              <span className="text-[9px]" style={{ color: 'var(--muted)' }}>点击右上角🗑️可删除</span>
-                            </div>
-                          )}
                         </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -1786,12 +2033,30 @@ export default function ImageStudioPage() {
                       const imageMediaId = s.vertical_image_media_id || s.horizontal_image_media_id
                       const status = s.vertical_image_status || s.horizontal_image_status || 'PENDING'
                       const dlState = downloading?.id === s.id ? downloading.res : null
+                      const openSceneDetail = () => imageUrl && setActiveMediaDetail({
+                        title: `分镜画面 Scene #${s.display_order || globalIdx+1}`,
+                        src: imageUrl,
+                        mediaId: imageMediaId,
+                        prompt: s.prompt,
+                        sceneOrder: s.display_order || globalIdx+1,
+                        status: status,
+                        time: s.created_at ? new Date(s.created_at).toLocaleString() : undefined,
+                      })
                       return (
                         <div key={s.id} className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-bold" style={{ color: 'var(--cyan)' }}>Scene #{s.display_order || globalIdx+1}</span>
                             <div className="flex gap-1 items-center">
                               <Badge variant="outline" className="text-[9px]">{status}</Badge>
+                              {imageUrl && (
+                                <button
+                                  onClick={openSceneDetail}
+                                  className="text-[11px] px-1.5 py-0.5 rounded border hover:border-cyan-400 text-cyan-400 transition-colors"
+                                  title="查看高清大图与元数据"
+                                >
+                                  ℹ️
+                                </button>
+                              )}
                               {imageMediaId && (
                                 <button
                                   onClick={() => handleRefreshScene(s)}
@@ -1820,11 +2085,16 @@ export default function ImageStudioPage() {
                               )}
                             </div>
                           </div>
-                          <div className="w-full aspect-video rounded overflow-hidden bg-black flex items-center justify-center border" style={{ borderColor: 'var(--border)' }}>
+                          <div
+                            className={`w-full aspect-video rounded overflow-hidden bg-black flex items-center justify-center border ${imageUrl ? 'cursor-pointer group' : ''}`}
+                            style={{ borderColor: 'var(--border)' }}
+                            onClick={() => !videoUrl && openSceneDetail()}
+                            title={imageUrl ? "点击查看高清大图与元数据" : undefined}
+                          >
                             {videoUrl ? (
                               <video controls src={videoUrl} className="w-full h-full object-cover" />
                             ) : imageUrl ? (
-                              <CachedImage mediaId={imageMediaId} src={imageUrl} alt="scene" className="w-full h-full object-cover" />
+                              <CachedImage mediaId={imageMediaId} src={imageUrl} alt="scene" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                             ) : (
                               <span className="text-[10px]" style={{ color: 'var(--muted)' }}>📷 媒体生成中...</span>
                             )}
@@ -1893,6 +2163,15 @@ export default function ImageStudioPage() {
         </div>
 
       </div>
+
+      {/* Lightbox Modal: Large Image Preview + Complete Metadata */}
+      {activeMediaDetail && (
+        <ImageDetailModal
+          info={activeMediaDetail}
+          onClose={() => setActiveMediaDetail(null)}
+          onDownloadAtResolution={downloadAtResolution}
+        />
+      )}
     </div>
   )
 }
