@@ -6,7 +6,7 @@
  * the page stays open) does NOT throw "Identifier has already been declared".
  */
 (() => {
-  const VERSION = 'v3';
+  const VERSION = 'v4';
   if (window.__FLOWKIT_INJECTED__ === VERSION) return;
 
   const SITE_KEY = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
@@ -35,8 +35,8 @@
           detail: { url, body: requestBody },
         }));
       }
-      // Only intercept TRPC calls on labs.google that return project/flow data
-      if (url.includes('/fx/api/trpc/') && response.ok) {
+      // Intercept TRPC calls on flow.google.com or labs.google that return project/flow data
+      if ((url.includes('/fx/api/trpc/') || url.includes('/api/trpc/')) && response.ok) {
         const clone = response.clone();
         clone.text().then(text => {
           if (text.includes('storage.googleapis.com/ai-sandbox-videofx/')
@@ -78,11 +78,23 @@
     return _originalXhrSend.apply(this, arguments);
   };
 
+  function getRecaptchaSiteKey() {
+    try {
+      const script = document.querySelector('script[src*="recaptcha"][src*="render="]');
+      if (script) {
+        const match = script.src.match(/render=([^&]+)/);
+        if (match && match[1] && match[1] !== 'explicit') return match[1];
+      }
+    } catch {}
+    return SITE_KEY;
+  }
+
   window.addEventListener('GET_CAPTCHA', async ({ detail }) => {
     const { requestId, pageAction } = detail;
     try {
       await waitForGrecaptcha();
-      const token = await window.grecaptcha.enterprise.execute(SITE_KEY, {
+      const siteKey = getRecaptchaSiteKey();
+      const token = await window.grecaptcha.enterprise.execute(siteKey, {
         action: pageAction,
       });
       window.dispatchEvent(new CustomEvent('CAPTCHA_RESULT', {

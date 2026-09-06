@@ -5,7 +5,10 @@
   "description": "Local agent bridge for Google Flow API — captures tokens, solves reCAPTCHA, proxies API calls",
   "permissions": ["storage", "alarms", "tabs", "webRequest", "scripting", "declarativeNetRequest", "sidePanel"],
   "host_permissions": [
+    "https://flow.google.com/*",
+    "https://flow.google/*",
     "https://labs.google/*",
+    "https://flow-content.google/*",
     "https://aisandbox-pa.googleapis.com/*",
     "http://127.0.0.1:8100/*"
   ],
@@ -15,6 +18,8 @@
   "content_scripts": [
     {
       "matches": [
+        "https://flow.google.com/*",
+        "https://flow.google/*",
         "https://labs.google/fx/*",
         "https://labs.google/tools/flow*"
       ],
@@ -25,7 +30,11 @@
   "web_accessible_resources": [
     {
       "resources": ["injected.js"],
-      "matches": ["https://labs.google/*"]
+      "matches": [
+        "https://flow.google.com/*",
+        "https://flow.google/*",
+        "https://labs.google/*"
+      ]
     }
   ],
   "declarative_net_request": {

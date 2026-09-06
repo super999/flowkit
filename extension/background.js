@@ -118,14 +118,18 @@ let _lastFlowTabId = null;
 
 function isFlowUrl(url) {
   if (!url) return false;
-  return url.includes('labs.google') && (url.includes('/flow') || url.includes('/tools/flow'));
+  if (url.includes('flow.google.com') || url.includes('flow.google')) return true;
+  if (url.includes('labs.google')) {
+    return url.includes('/fx') || url.includes('flow') || url.includes('/tools');
+  }
+  return false;
 }
 
 async function findFlowTab() {
   if (_lastFlowTabId !== null) {
     try {
       const tab = await chrome.tabs.get(_lastFlowTabId);
-      if (isFlowUrl(tab?.url)) {
+      if (tab?.url && (isFlowUrl(tab.url) || tab.url.includes('flow.google') || tab.url.includes('labs.google'))) {
         return tab;
       }
     } catch {}
@@ -134,7 +138,10 @@ async function findFlowTab() {
 
   try {
     const allTabs = await chrome.tabs.query({});
-    const flowTab = allTabs.find((t) => isFlowUrl(t.url));
+    let flowTab = allTabs.find((t) => isFlowUrl(t.url));
+    if (!flowTab) {
+      flowTab = allTabs.find((t) => t.url && (t.url.includes('flow.google') || t.url.includes('labs.google')));
+    }
     if (flowTab) {
       _lastFlowTabId = flowTab.id;
       return flowTab;
@@ -155,7 +162,7 @@ async function captureTokenFromFlowTab() {
     _openingFlowTab = true;
     try {
       console.log('[FlowAgent] No Flow tab found — opening one in background');
-      const created = await chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow', active: false });
+      const created = await chrome.tabs.create({ url: 'https://flow.google.com', active: false });
       const start = Date.now();
       while (Date.now() - start < 15000) {
         await sleep(1000);
@@ -310,7 +317,7 @@ function sendToAgent(msg) {
 async function handleFetchRedirect(msg) {
   const { id, params } = msg;
   const { url } = params || {};
-  if (!url || !url.startsWith('https://labs.google/')) {
+  if (!url || (!url.startsWith('https://labs.google/') && !url.startsWith('https://flow.google.com/'))) {
     sendToAgent({ id, error: 'INVALID_URL' });
     return;
   }
@@ -319,7 +326,7 @@ async function handleFetchRedirect(msg) {
 
   if (!tab) {
     try {
-      await chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow', active: false });
+      await chrome.tabs.create({ url: 'https://flow.google.com', active: false });
       const start = Date.now();
       while (Date.now() - start < 15000) {
         await sleep(1000);
@@ -375,7 +382,8 @@ async function requestCaptchaFromTab(tabId, requestId, pageAction) {
     const msg = error?.message || '';
     const shouldInject =
       msg.includes('Receiving end does not exist') ||
-      msg.includes('Could not establish connection');
+      msg.includes('Could not establish connection') ||
+      msg.includes('message channel closed');
     if (!shouldInject) throw error;
 
     // Inject content script and retry
@@ -399,7 +407,7 @@ async function solveCaptcha(requestId, captchaAction) {
     // Auto-open Flow tab and wait for it to load
     try {
       console.log('[FlowAgent] No Flow tab found — opening one in background');
-      const created = await chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow', active: false });
+      const created = await chrome.tabs.create({ url: 'https://flow.google.com', active: false });
       const start = Date.now();
       while (Date.now() - start < 15000) {
         await sleep(1000);
@@ -457,7 +465,7 @@ async function handleTrpcRequest(msg) {
   const { id, params } = msg;
   const { url, method = 'POST', headers = {}, body } = params;
 
-  if (!url || !url.startsWith('https://labs.google/')) {
+  if (!url || (!url.startsWith('https://labs.google/') && !url.startsWith('https://flow.google.com/'))) {
     sendToAgent({ id, error: 'INVALID_TRPC_URL' });
     return;
   }
@@ -678,7 +686,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         }
         reply({ ok: true, tabId: flowTab.id });
       } else {
-        chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow' })
+        chrome.tabs.create({ url: 'https://flow.google.com' })
           .then((tab) => reply({ ok: true, tabId: tab.id }))
           .catch((e) => reply({ error: e.message }));
       }

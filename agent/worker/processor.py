@@ -275,7 +275,7 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
             await _handle_failure(rid, req, result, retry_after)
         else:
             gen_result = parse_result(result, req_type)
-            await crud.update_request(rid, status="COMPLETED", media_id=gen_result.media_id, output_url=gen_result.url)
+            await crud.update_request(rid, status="COMPLETED", media_id=gen_result.media_id, output_url=gen_result.url, error_message=None)
             if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
                 char_id = req.get("character_id")
                 if char_id:
