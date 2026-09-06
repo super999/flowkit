@@ -59,6 +59,7 @@ export default function ReferenceLibraryPage() {
   const [cachingAll, setCachingAll] = useState(false)
   const [cachingId, setCachingId] = useState<string | null>(null)
   const [uploading, setUploading] = useState(0)
+  const [repairingPrompts, setRepairingPrompts] = useState(false)
   const [statusMsg, setStatusMsg] = useState('')
 
   // Modal lightbox detail state
@@ -196,6 +197,24 @@ export default function ReferenceLibraryPage() {
       setStatusMsg(`❌ 缓存失败: ${e.message || e}`)
     } finally {
       setCachingId(null)
+    }
+  }
+
+  // Batch repair historical prompts from Flow
+  async function handleRepairPrompts() {
+    setRepairingPrompts(true)
+    setStatusMsg('✨ 正在连接 Google Flow 云端批量矫正所有历史媒体的中文原始提示词与翻译词...')
+    try {
+      const res = await postAPI<{ status: string; repaired?: number; restored_local?: number; cleaned?: number; message?: string }>(
+        '/api/media-library/repair-prompts',
+        { project_id: selectedProjectId || undefined }
+      )
+      setStatusMsg(`✅ ${res.message || '历史提示词修复完成'}`)
+      await loadMedia()
+    } catch (e: any) {
+      setStatusMsg(`❌ 修复失败: ${e.message || e}`)
+    } finally {
+      setRepairingPrompts(false)
     }
   }
 
@@ -383,6 +402,18 @@ export default function ReferenceLibraryPage() {
                 {cachingAll ? '⏳ 缓存中...' : `💾 缓存全部未缓存 (${stats.uncached_count})`}
               </Button>
             )}
+
+            {/* Repair Historical Prompts Button */}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={repairingPrompts || syncing}
+              onClick={handleRepairPrompts}
+              className="text-xs text-amber-300 border-amber-600/70 hover:bg-amber-950/40 gap-1 shadow-sm"
+              title="一键拉取 Flow 原版结构化数据，修复所有历史存量媒体的中文提示词与英文翻译"
+            >
+              {repairingPrompts ? '⏳ 修复提示词中...' : '✨ 一键修复历史提示词'}
+            </Button>
 
             <Button
               size="sm"
@@ -670,7 +701,7 @@ export default function ReferenceLibraryPage() {
                       <span
                         className="text-[9px] truncate flex items-center gap-1 cursor-pointer hover:text-accent transition-colors"
                         style={{ color: 'var(--text)' }}
-                        title={item.prompt || item.name || '参考图'}
+                        title={item.translated_prompt ? `${item.prompt || item.name}\n🌐 翻译/底层词: ${item.translated_prompt}` : (item.prompt || item.name || '参考图')}
                         onClick={openDetail}
                       >
                         {item.name || item.prompt || '参考图'}

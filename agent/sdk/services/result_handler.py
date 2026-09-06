@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from agent.db import crud
+from agent.models.enums import orientation_prefix
 from agent.worker._parsing import _is_error, _extract_media_id, _extract_output_url
 
 if TYPE_CHECKING:
@@ -44,7 +45,7 @@ async def apply_scene_result(
     if not scene_id or not result.success:
         return
 
-    p = "vertical" if orientation == "VERTICAL" else "horizontal"
+    p = orientation_prefix(orientation)
     updates = {}
 
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE"):

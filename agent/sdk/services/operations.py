@@ -40,6 +40,7 @@ def _char_matches(c: dict, name_set: set) -> bool:
 import aiohttp
 
 from agent.db import crud
+from agent.models.enums import orientation_prefix
 from agent.config import VIDEO_POLL_INTERVAL, VIDEO_POLL_TIMEOUT
 from agent.utils.paths import scene_4k_path
 from agent.utils.slugify import slugify
@@ -380,7 +381,7 @@ class OperationService:
         pid = scene.get("_project_id", "0")
 
         src = source_media_id
-        orient_prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+        orient_prefix = orientation_prefix(orientation)
         # CONTINUATION scenes always edit from parent's image (that's the
         # whole point of chaining).  Only non-chain scenes edit their own.
         if not src and scene.get("parent_scene_id"):
@@ -429,13 +430,13 @@ class OperationService:
     async def generate_scene_video(self, scene: dict, orientation: str,
                                    request_id: str = "") -> dict:
         """Generate video from a scene image (i2v). Submits + polls."""
-        prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+        prefix = orientation_prefix(orientation)
         image_media_id = scene.get(f"{prefix}_image_media_id")
         if not image_media_id:
             return {"error": f"No {prefix} image media_id for scene"}
 
         project = await crud.get_project(scene.get("_project_id", "0"))
-        aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if prefix == "vertical" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
         tier = project.get("user_paygate_tier", "PAYGATE_TIER_TWO") if project else "PAYGATE_TIER_TWO"
         pid = scene.get("_project_id", "0")
         end_id = scene.get(f"{prefix}_end_scene_media_id")
@@ -507,10 +508,10 @@ class OperationService:
         the scene's end_scene image.
         """
         project = await crud.get_project(scene.get("_project_id", "0"))
-        aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        prefix = orientation_prefix(orientation)
+        aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if prefix == "vertical" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
         tier = project.get("user_paygate_tier", "PAYGATE_TIER_TWO") if project else "PAYGATE_TIER_TWO"
         pid = scene.get("_project_id", "0")
-        prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
         end_id = scene.get(f"{prefix}_end_scene_media_id")
 
         # Chain scenes with end_image: prefer transition_prompt
@@ -615,12 +616,12 @@ class OperationService:
         If a previous attempt already submitted (op_name saved in DB), skip
         submit and just re-poll — avoids duplicate API calls on retry.
         """
-        prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+        prefix = orientation_prefix(orientation)
         video_media_id = scene.get(f"{prefix}_video_media_id")
         if not video_media_id:
             return {"error": f"No {prefix} video media_id for scene"}
 
-        aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if orientation == "VERTICAL" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        aspect = "VIDEO_ASPECT_RATIO_PORTRAIT" if prefix == "vertical" else "VIDEO_ASPECT_RATIO_LANDSCAPE"
 
         # Check if already submitted (op_name saved from previous attempt)
         existing_op = None

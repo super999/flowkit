@@ -1,10 +1,12 @@
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from agent.models.request import Request, RequestCreate
-from agent.models.enums import StatusType
+from agent.models.enums import StatusType, normalize_orientation
 from agent.db import crud
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/requests", tags=["requests"])
 
 
@@ -54,8 +56,10 @@ async def create(body: RequestCreate):
     # Auto-set video orientation (symmetric with batch endpoint)
     vid = data.get("video_id")
     orient = data.get("orientation")
+    if orient:
+        data["orientation"] = normalize_orientation(orient)
     if vid and orient:
-        await crud.update_video(vid, orientation=orient)
+        await crud.update_video(vid, orientation=normalize_orientation(orient))
 
     return await crud.create_request(**data)
 
@@ -64,41 +68,47 @@ async def create(body: RequestCreate):
 async def create_batch(body: BatchRequestCreate):
     """Submit multiple requests atomically. Server handles throttling (max 5 concurrent, 10s cooldown).
     Duplicate active requests for the same scene+type are skipped (not errors)."""
-    # Auto-set video orientation from the batch (tracks current active orientation)
-    _seen_vids: set[str] = set()
-    for item in body.requests:
-        vid = item.video_id
-        orient = item.orientation
-        if vid and orient and vid not in _seen_vids:
-            _seen_vids.add(vid)
-            await crud.update_video(vid, orientation=orient)
-    results = []
-    for item in body.requests:
-        data = item.model_dump(exclude_none=True)
-        data["req_type"] = data.pop("type")
-        scene_id = data.get("scene_id")
-        character_id = data.get("character_id")
-        req_type = data.get("req_type")
-        # Idempotent: skip if active request already exists
-        if scene_id and req_type:
-            existing = await crud.list_requests(scene_id=scene_id)
-            active = [r for r in existing
-                      if r.get("type") == req_type
-                      and r.get("status") in ("PENDING", "PROCESSING")]
-            if active:
-                results.append(active[0])
-                continue
-        if character_id and req_type:
-            existing = await crud.list_requests(project_id=data.get("project_id"))
-            active = [r for r in existing
-                      if r.get("character_id") == character_id
-                      and r.get("type") == req_type
-                      and r.get("status") in ("PENDING", "PROCESSING")]
-            if active:
-                results.append(active[0])
-                continue
-        results.append(await crud.create_request(**data))
-    return results
+    try:
+        # Auto-set video orientation from the batch (tracks current active orientation)
+        _seen_vids: set[str] = set()
+        for item in body.requests:
+            vid = item.video_id
+            orient = item.orientation
+            if vid and orient and vid not in _seen_vids:
+                _seen_vids.add(vid)
+                await crud.update_video(vid, orientation=normalize_orientation(orient))
+        results = []
+        for item in body.requests:
+            data = item.model_dump(exclude_none=True)
+            data["req_type"] = data.pop("type")
+            if data.get("orientation"):
+                data["orientation"] = normalize_orientation(data["orientation"])
+            scene_id = data.get("scene_id")
+            character_id = data.get("character_id")
+            req_type = data.get("req_type")
+            # Idempotent: skip if active request already exists
+            if scene_id and req_type:
+                existing = await crud.list_requests(scene_id=scene_id)
+                active = [r for r in existing
+                          if r.get("type") == req_type
+                          and r.get("status") in ("PENDING", "PROCESSING")]
+                if active:
+                    results.append(active[0])
+                    continue
+            if character_id and req_type:
+                existing = await crud.list_requests(project_id=data.get("project_id"))
+                active = [r for r in existing
+                          if r.get("character_id") == character_id
+                          and r.get("type") == req_type
+                          and r.get("status") in ("PENDING", "PROCESSING")]
+                if active:
+                    results.append(active[0])
+                    continue
+            results.append(await crud.create_request(**data))
+        return results
+    except Exception as e:
+        logger.exception("create_batch error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("", response_model=list[Request])

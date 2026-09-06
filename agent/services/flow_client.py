@@ -22,6 +22,106 @@ from agent.services.headers import random_headers
 logger = logging.getLogger(__name__)
 
 
+def clean_flow_prompt_text(p: str) -> str:
+    """Clean translation prefixes and quotes from Flow generated prompts."""
+    if not p:
+        return ""
+    p = p.strip()
+    prefixes = [
+        "Here's the English translation of your image prompt:",
+        "Here's the English translation of the image prompt:",
+        "Here's the English translation of your video prompt:",
+        "Here's the English translation of the video prompt:",
+        "Here's the English translation of your prompt:",
+        "Here's the English translation of the prompt:",
+        "Here's the English translation:",
+        "Here is the English translation of your image prompt:",
+        "Here is the English translation of the image prompt:",
+        "Here is the English translation of your video prompt:",
+        "Here is the English translation of the video prompt:",
+        "Here is the English translation of your prompt:",
+        "Here is the English translation of the prompt:",
+        "Here is the English translation:",
+    ]
+    p_lower = p.lower()
+    for prefix in prefixes:
+        pref_lower = prefix.lower()
+        if pref_lower in p_lower:
+            idx = p_lower.find(pref_lower)
+            rest = p[idx + len(prefix):].strip()
+            if (rest.startswith('"') and rest.endswith('"')) or (rest.startswith("'") and rest.endswith("'")):
+                rest = rest[1:-1].strip()
+            return rest
+    return p
+
+
+def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Optional[str]]:
+    """Extract (original_prompt, translated_prompt) from Flow media and workflow.
+
+    Returns:
+        (original_prompt, translated_prompt):
+        - original_prompt: user's original input (e.g. Chinese) or primary prompt
+        - translated_prompt: translated English prompt if different, else None
+    """
+    meta = item.get("mediaMetadata", {}) or item.get("metadata", {}) if isinstance(item, dict) else {}
+    req_data = meta.get("requestData", {}) if isinstance(meta, dict) else {}
+    prompt_inputs = req_data.get("promptInputs", []) if isinstance(req_data, dict) else []
+
+    orig_prompt = ""
+    trans_prompt = ""
+
+    if prompt_inputs and isinstance(prompt_inputs, list):
+        pi = prompt_inputs[0]
+        if isinstance(pi, dict):
+            sp = pi.get("structuredPrompt", {})
+            if isinstance(sp, dict):
+                parts = sp.get("parts", [])
+                if parts and isinstance(parts, list):
+                    texts = [p.get("text", "").strip() for p in parts if isinstance(p, dict) and p.get("text")]
+                    if texts:
+                        orig_prompt = "".join(texts).strip()
+            trans_prompt = pi.get("textInput", "").strip()
+
+    if not orig_prompt:
+        media_title = meta.get("mediaTitle", "").strip() if isinstance(meta, dict) else ""
+        if media_title:
+            orig_prompt = media_title
+        elif wf and isinstance(wf, dict):
+            wf_meta = wf.get("metadata", {}) or wf.get("mediaMetadata", {}) if isinstance(wf, dict) else {}
+            wf_disp = wf_meta.get("displayName", "").strip() if isinstance(wf_meta, dict) else ""
+            wf_user = wf.get("userPrompt", "").strip()
+            orig_prompt = wf_user or wf_disp
+
+    img = item.get("image", {}) or (wf.get("image", {}) if isinstance(wf, dict) else {})
+    vid = item.get("video", {}) or (wf.get("video", {}) if isinstance(wf, dict) else {})
+    gen_img = img.get("generatedImage", {}) if isinstance(img, dict) else {}
+    gen_vid = vid.get("generatedVideo", {}) if isinstance(vid, dict) else {}
+
+    model_prompt = (
+        gen_img.get("prompt", "") or gen_vid.get("prompt", "") or
+        (img.get("prompt", "") if isinstance(img, dict) else "") or
+        (vid.get("prompt", "") if isinstance(vid, dict) else "") or
+        (wf.get("prompt", "") if isinstance(wf, dict) else "")
+    ).strip()
+
+    if not trans_prompt and model_prompt:
+        trans_prompt = model_prompt
+
+    cleaned_trans = clean_flow_prompt_text(trans_prompt)
+    cleaned_orig = clean_flow_prompt_text(orig_prompt)
+
+    if cleaned_orig and cleaned_trans and cleaned_orig != cleaned_trans:
+        return cleaned_orig, cleaned_trans
+    elif cleaned_orig:
+        return cleaned_orig, None
+    elif cleaned_trans:
+        return cleaned_trans, None
+    elif model_prompt:
+        cleaned_model = clean_flow_prompt_text(model_prompt)
+        return cleaned_model, None
+    return "", None
+
+
 class FlowClient:
     """Sends commands to Chrome extension via WebSocket."""
 
@@ -691,11 +791,8 @@ class FlowClient:
                 gen_img = img.get("generatedImage", {}) if isinstance(img, dict) else {}
                 gen_vid = vid.get("generatedVideo", {}) if isinstance(vid, dict) else {}
 
-                prompt = (
-                    gen_img.get("prompt", "") or gen_vid.get("prompt", "") or
-                    img.get("prompt", "") or vid.get("prompt", "") or
-                    wf.get("prompt", "") or wf.get("userPrompt", "")
-                )
+                orig_prompt, trans_prompt = extract_prompt_pair_from_media(item, wf)
+
                 model = (
                     gen_img.get("modelNameType", "") or gen_vid.get("modelNameType", "") or
                     img.get("modelNameType", "") or vid.get("modelNameType", "") or
@@ -725,7 +822,8 @@ class FlowClient:
                 results.append({
                     "mediaKey": media_key,
                     "mediaType": gen_id.get("mediaType") or ("VIDEO" if vid else "IMAGE"),
-                    "prompt": prompt,
+                    "prompt": orig_prompt,
+                    "translated_prompt": trans_prompt,
                     "modelName": model,
                     "aspectRatio": aspect,
                     "workflowId": w_id,
@@ -752,7 +850,8 @@ class FlowClient:
                 gen_img = img.get("generatedImage", {}) if isinstance(img, dict) else {}
                 gen_vid = vid.get("generatedVideo", {}) if isinstance(vid, dict) else {}
 
-                prompt = gen_img.get("prompt", "") or gen_vid.get("prompt", "") or img.get("prompt", "") or vid.get("prompt", "")
+                orig_prompt, trans_prompt = extract_prompt_pair_from_media(media, wf)
+
                 model = gen_img.get("modelNameType", "") or gen_vid.get("modelNameType", "") or img.get("modelNameType", "") or vid.get("modelNameType", "")
                 aspect = gen_img.get("aspectRatio", "") or gen_vid.get("aspectRatio", "") or img.get("aspectRatio", "") or vid.get("aspectRatio", "")
 
@@ -771,7 +870,8 @@ class FlowClient:
                 results.append({
                     "mediaKey": media_key,
                     "mediaType": gen_id.get("mediaType", "IMAGE"),
-                    "prompt": prompt,
+                    "prompt": orig_prompt,
+                    "translated_prompt": trans_prompt,
                     "modelName": model,
                     "aspectRatio": aspect,
                     "workflowId": gen_id.get("workflowId", ""),

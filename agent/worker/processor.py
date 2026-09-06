@@ -16,6 +16,7 @@ from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
 from agent.config import POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS
 from agent.worker._parsing import _is_error
+from agent.models.enums import orientation_prefix
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
 
 logger = logging.getLogger(__name__)
@@ -175,7 +176,7 @@ class WorkerController:
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
     """Check if prerequisites are ready. Returns False to defer (stay PENDING)."""
     req_type = req.get("type", "")
-    prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+    prefix = orientation_prefix(orientation)
 
     # Video gen needs scene image to be ready; upscale needs video to be ready
     if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO"):
@@ -237,7 +238,7 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
         logger.info("Request %s skipped — already COMPLETED", rid[:8])
         # Copy existing result data from scene/character onto the request record
         skip_kwargs = {"status": "COMPLETED", "error_message": "skipped: already completed"}
-        prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+        prefix = orientation_prefix(orientation)
         if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
             char = await crud.get_character(req.get("character_id"))
             if char:
@@ -378,7 +379,7 @@ async def _recover_entity_not_found(req: dict) -> bool:
     req_type = req.get("type", "")
     pid = req.get("project_id", "")
     orientation = await _resolve_orientation(req)
-    prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+    prefix = orientation_prefix(orientation)
 
     # Scene-based requests: re-upload scene image
     if req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO"):
@@ -486,7 +487,7 @@ async def _mark_scene_failed(req: dict):
     if not scene_id:
         return
     orientation = await _resolve_orientation(req)
-    prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+    prefix = orientation_prefix(orientation)
     req_type = req["type"]
     updates = {}
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE"):
@@ -507,7 +508,7 @@ async def _is_already_completed(req: dict, orientation: str) -> bool:
     scene = await crud.get_scene(scene_id)
     if not scene:
         return False
-    prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+    prefix = orientation_prefix(orientation)
     if req_type in ("EDIT_IMAGE", "REGENERATE_IMAGE", "REGENERATE_VIDEO", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
         return False  # Always run — explicitly requesting new generation
     if req_type == "GENERATE_IMAGE":

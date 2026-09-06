@@ -121,6 +121,18 @@ async def upload_local_item(body: MediaItemUpload):
     return item
 
 
+class RepairPromptsRequest(BaseModel):
+    project_id: Optional[str] = None
+
+
+@router.post("/fix-prompts")
+@router.post("/repair-prompts")
+async def fix_prompts(body: Optional[RepairPromptsRequest] = None):
+    """Restore original user prompts from Flow structured prompts, refgen_result, scenes, and clean translations."""
+    pid = body.project_id if body else None
+    return await media_sync.repair_flow_prompts(project_id=pid)
+
+
 @router.delete("/{media_id}")
 async def delete_item(media_id: str):
     """Delete a media item from the local media library database."""
@@ -128,38 +140,3 @@ async def delete_item(media_id: str):
     if not success:
         raise HTTPException(404, "Media not found")
     return {"status": "success", "media_id": media_id}
-
-
-@router.post("/fix-prompts")
-async def fix_prompts():
-    """Restore original user prompts from refgen_result and scenes, and clean translation preambles."""
-    db = await crud.get_db()
-    restored_count = 0
-    cleaned_count = 0
-    async with crud._db_lock:
-        # 1. Restore from refgen_result
-        cur = await db.execute("SELECT media_id, prompt FROM refgen_result WHERE prompt IS NOT NULL AND prompt != ''")
-        for r in await cur.fetchall():
-            mid = r["media_id"]
-            p = r["prompt"]
-            await db.execute("UPDATE media_library SET prompt = ?, name = ?, source = 'refgen' WHERE media_id = ?", (p, p[:50], mid))
-            restored_count += 1
-        
-        # 2. Restore from scene
-        cur2 = await db.execute("SELECT image_media_id, prompt FROM scene WHERE image_media_id IS NOT NULL AND prompt IS NOT NULL AND prompt != ''")
-        for r in await cur2.fetchall():
-            mid = r["image_media_id"]
-            p = r["prompt"]
-            await db.execute("UPDATE media_library SET prompt = ?, name = ? WHERE media_id = ?", (p, p[:50], mid))
-            restored_count += 1
-
-        # 3. Clean any remaining prompts with English translation prefix
-        cur3 = await db.execute("SELECT media_id, prompt FROM media_library WHERE prompt LIKE '%English translation of your image prompt%'")
-        for r in await cur3.fetchall():
-            mid = r["media_id"]
-            p = media_sync._clean_flow_prompt(r["prompt"])
-            await db.execute("UPDATE media_library SET prompt = ?, name = ? WHERE media_id = ?", (p, p[:50], mid))
-            cleaned_count += 1
-
-        await db.commit()
-    return {"status": "success", "restored": restored_count, "cleaned": cleaned_count}

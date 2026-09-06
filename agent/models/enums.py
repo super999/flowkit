@@ -6,7 +6,25 @@ RequestType = Literal[
     "GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE",
 ]
 
-Orientation = Literal["VERTICAL", "HORIZONTAL"]
+Orientation = str
+
+
+def normalize_orientation(orient: str | None) -> str:
+    """Normalize orientation or aspect_ratio string to 'VERTICAL' or 'HORIZONTAL'."""
+    if not orient:
+        return "VERTICAL"
+    u = orient.upper()
+    if u in ("HORIZONTAL", "VERTICAL"):
+        return u
+    if "LANDSCAPE" in u:
+        return "HORIZONTAL"
+    return "VERTICAL"
+
+
+def orientation_prefix(orient: str | None) -> str:
+    """Return 'vertical' or 'horizontal' for database column prefixes."""
+    return "horizontal" if normalize_orientation(orient) == "HORIZONTAL" else "vertical"
+
 
 StatusType = Literal["PENDING", "PROCESSING", "COMPLETED", "FAILED"]
 

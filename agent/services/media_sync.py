@@ -80,15 +80,8 @@ async def cache_media_item(
 def _clean_flow_prompt(p: str) -> str:
     if not p:
         return ""
-    p = p.strip()
-    prefix = "Here's the English translation of your image prompt:"
-    if prefix.lower() in p.lower():
-        idx = p.lower().find(prefix.lower())
-        rest = p[idx + len(prefix):].strip()
-        if (rest.startswith('"') and rest.endswith('"')) or (rest.startswith("'") and rest.endswith("'")):
-            rest = rest[1:-1].strip()
-        return rest
-    return p
+    from agent.services.flow_client import clean_flow_prompt_text
+    return clean_flow_prompt_text(p)
 
 
 async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = True) -> Dict[str, Any]:
@@ -182,18 +175,18 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
                         is_cached = 1 if (cached_p.exists() and cached_p.stat().st_size > 0) else 0
                         local_path = f"/output/_cache/{mid}.{ext}" if is_cached else None
 
-                        raw_flow_prompt = item.get("prompt") or ""
-                        cleaned_flow_prompt = _clean_flow_prompt(raw_flow_prompt)
+                        flow_orig_prompt = item.get("prompt") or ""
+                        flow_trans_prompt = item.get("translated_prompt") or None
                         user_orig_prompt = local_user_prompts.get(mid)
 
-                        # prompt: original user prompt (or cleaned flow prompt)
+                        # prompt: original user prompt (or Flow Chinese/original prompt)
                         # translated_prompt: underlying translated english prompt if different
-                        if user_orig_prompt and user_orig_prompt != cleaned_flow_prompt:
+                        if user_orig_prompt:
                             prompt_text = user_orig_prompt
-                            translated_prompt_text = cleaned_flow_prompt
+                            translated_prompt_text = flow_trans_prompt or (_clean_flow_prompt(flow_orig_prompt) if flow_orig_prompt != user_orig_prompt else None)
                         else:
-                            prompt_text = cleaned_flow_prompt
-                            translated_prompt_text = None
+                            prompt_text = flow_orig_prompt or _clean_flow_prompt(flow_trans_prompt or "")
+                            translated_prompt_text = flow_trans_prompt if flow_trans_prompt != prompt_text else None
 
                         model = item.get("modelName") or ""
                         aspect = item.get("aspectRatio") or ""
@@ -344,3 +337,120 @@ def stop_periodic_sync():
     if _sync_task and not _sync_task.done():
         _sync_task.cancel()
         _sync_task = None
+
+
+async def repair_flow_prompts(project_id: Optional[str] = None) -> Dict[str, Any]:
+    """Batch repair historical media prompts in media_library by re-reading Flow project initial data.
+
+    1. Reconnects/queries Flow client for projects.
+    2. Fetches full `projectInitialData` and extracts Chinese user prompts + English translated prompts.
+    3. Restores prompts from local `refgen_result` and `scene`.
+    4. Updates database records where prompt was previously saved as English or translated_prompt was missing.
+    """
+    client = get_flow_client()
+    if not client or not client.connected:
+        return {"status": "error", "repaired": 0, "message": "Flow 扩展未连接或未登录"}
+
+    db = await crud.get_db()
+    repaired_count = 0
+    restored_local = 0
+    cleaned_count = 0
+
+    # 1. Restore local user prompts from refgen_result & scene first
+    local_prompts = {}
+    async with crud._db_lock:
+        cur1 = await db.execute("SELECT media_id, prompt FROM refgen_result WHERE prompt IS NOT NULL AND prompt != ''")
+        for r in await cur1.fetchall():
+            local_prompts[r["media_id"]] = r["prompt"]
+            await db.execute("UPDATE media_library SET prompt = ?, name = ?, source = 'refgen' WHERE media_id = ?", (r["prompt"], r["prompt"][:50], r["media_id"]))
+            restored_local += 1
+
+        cur_v = await db.execute("SELECT vertical_image_media_id, prompt FROM scene WHERE vertical_image_media_id IS NOT NULL AND prompt IS NOT NULL AND prompt != ''")
+        for r in await cur_v.fetchall():
+            local_prompts[r["vertical_image_media_id"]] = r["prompt"]
+            await db.execute("UPDATE media_library SET prompt = ?, name = ? WHERE media_id = ?", (r["prompt"], r["prompt"][:50], r["vertical_image_media_id"]))
+            restored_local += 1
+
+        cur_h = await db.execute("SELECT horizontal_image_media_id, prompt FROM scene WHERE horizontal_image_media_id IS NOT NULL AND prompt IS NOT NULL AND prompt != ''")
+        for r in await cur_h.fetchall():
+            local_prompts[r["horizontal_image_media_id"]] = r["prompt"]
+            await db.execute("UPDATE media_library SET prompt = ?, name = ? WHERE media_id = ?", (r["prompt"], r["prompt"][:50], r["horizontal_image_media_id"]))
+            restored_local += 1
+
+        await db.commit()
+
+    # 2. Get list of Flow projects to inspect
+    projects_to_check = []
+    if project_id:
+        projects_to_check.append(project_id)
+    else:
+        try:
+            projs = await client.search_user_projects(limit=100)
+            projects_to_check = [p.get("projectId") for p in projs if p.get("projectId")]
+        except Exception as e:
+            logger.warning("Failed to search user projects for prompt repair: %s", e)
+
+    # 3. For each project, fetch project media and extract prompts
+    for pid in projects_to_check:
+        try:
+            media_items = await client.fetch_project_media(pid, limit=200)
+            if not media_items:
+                continue
+
+            async with crud._db_lock:
+                for item in media_items:
+                    mid = item.get("mediaKey") or item.get("media_id")
+                    if not mid:
+                        continue
+
+                    orig_p = item.get("prompt") or ""
+                    trans_p = item.get("translated_prompt") or None
+
+                    if mid in local_prompts:
+                        orig_p = local_prompts[mid]
+
+                    if not orig_p and not trans_p:
+                        continue
+
+                    if orig_p:
+                        await db.execute(
+                            """UPDATE media_library 
+                               SET prompt = ?, 
+                                   name = ?, 
+                                   translated_prompt = COALESCE(?, translated_prompt)
+                               WHERE media_id = ?""",
+                            (orig_p, orig_p[:50], trans_p, mid)
+                        )
+                        repaired_count += 1
+                    elif trans_p:
+                        await db.execute(
+                            """UPDATE media_library 
+                               SET translated_prompt = ?
+                               WHERE media_id = ?""",
+                            (trans_p, mid)
+                        )
+                        repaired_count += 1
+
+                await db.commit()
+        except Exception as e:
+            logger.warning("Failed to repair prompts for project %s: %s", pid, e)
+
+    # 4. Clean any residual translation preambles
+    async with crud._db_lock:
+        cur3 = await db.execute("SELECT media_id, prompt, translated_prompt FROM media_library WHERE prompt LIKE '%English translation of your image prompt%' OR translated_prompt LIKE '%English translation of your image prompt%'")
+        for r in await cur3.fetchall():
+            mid = r["media_id"]
+            p = _clean_flow_prompt(r["prompt"]) if r["prompt"] else None
+            tp = _clean_flow_prompt(r["translated_prompt"]) if r["translated_prompt"] else None
+            await db.execute("UPDATE media_library SET prompt = COALESCE(?, prompt), name = COALESCE(?, name), translated_prompt = COALESCE(?, translated_prompt) WHERE media_id = ?", 
+                             (p, p[:50] if p else None, tp, mid))
+            cleaned_count += 1
+        await db.commit()
+
+    return {
+        "status": "success",
+        "repaired": repaired_count,
+        "restored_local": restored_local,
+        "cleaned": cleaned_count,
+        "message": f"成功修复 {repaired_count} 条云端原版提示词，恢复 {restored_local} 条本地提示词，清理 {cleaned_count} 条格式异常词。"
+    }
