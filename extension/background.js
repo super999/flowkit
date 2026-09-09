@@ -131,7 +131,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
     }
   },
-  { urls: ['https://aisandbox-pa.googleapis.com/*', 'https://labs.google/*'] },
+  { urls: ['https://aisandbox-pa.googleapis.com/*', 'https://labs.google/*', 'https://flow.google.com/*', 'https://flow.google/*'] },
   ['requestHeaders', 'extraHeaders'],
 );
 
@@ -338,55 +338,74 @@ function sendToAgent(msg) {
 // ─── Fetch redirect: resolve media.getMediaUrlRedirect → final signed URL ──
 async function handleFetchRedirect(msg) {
   const { id, params } = msg;
-  const { url } = params || {};
+  let { url } = params || {};
   if (!url || (!url.startsWith('https://labs.google/') && !url.startsWith('https://flow.google.com/'))) {
     sendToAgent({ id, error: 'INVALID_URL' });
     return;
   }
 
+  // 1. Prioritize page context resolution (Tab has full cookies, origin and automatically follows 302 redirects to CDN)
   let tab = await findFlowTab();
-
-  if (!tab) {
+  if (tab) {
+    let targetUrl = url;
+    if (tab.url && (tab.url.includes('flow.google.com') || tab.url.includes('flow.google'))) {
+      targetUrl = targetUrl.replace('https://labs.google/', 'https://flow.google.com/');
+    } else if (tab.url && tab.url.includes('labs.google')) {
+      targetUrl = targetUrl.replace('https://flow.google.com/', 'https://labs.google/');
+    }
     try {
-      await chrome.tabs.create({ url: 'https://flow.google.com', active: false });
-      const start = Date.now();
-      while (Date.now() - start < 15000) {
-        await sleep(1000);
-        tab = await findFlowTab();
-        if (tab) break;
+      const res = await chrome.tabs.sendMessage(tab.id, {
+        type: 'RESOLVE_REDIRECT',
+        url: targetUrl,
+      });
+      if (res?.finalUrl && res.finalUrl !== targetUrl && !res.finalUrl.includes('getMediaUrlRedirect')) {
+        sendToAgent({ id, status: res.status || 200, finalUrl: res.finalUrl });
+        return;
       }
     } catch (e) {
-      sendToAgent({ id, error: `NO_FLOW_TAB: ${e.message}` });
-      return;
-    }
-  }
-
-  if (!tab) {
-    sendToAgent({ id, error: 'NO_FLOW_TAB' });
-    return;
-  }
-
-  const tabId = tab.id;
-  try {
-    const res = await chrome.tabs.sendMessage(tabId, {
-      type: 'RESOLVE_REDIRECT',
-      url,
-    });
-    sendToAgent({ id, status: res?.status || 200, finalUrl: res?.finalUrl || '', error: res?.error });
-  } catch (e) {
-    const msgStr = e?.message || '';
-    if (msgStr.includes('Receiving end does not exist') || msgStr.includes('Could not establish connection')) {
-      try {
-        await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-        await sleep(200);
-        const res = await chrome.tabs.sendMessage(tabId, { type: 'RESOLVE_REDIRECT', url });
-        sendToAgent({ id, status: res?.status || 200, finalUrl: res?.finalUrl || '', error: res?.error });
-        return;
-      } catch (err) {
-        sendToAgent({ id, error: err.message || 'FETCH_REDIRECT_FAILED' });
-        return;
+      const msgStr = e?.message || '';
+      if (msgStr.includes('Receiving end does not exist') || msgStr.includes('Could not establish connection')) {
+        try {
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+          await sleep(200);
+          const res = await chrome.tabs.sendMessage(tab.id, { type: 'RESOLVE_REDIRECT', url: targetUrl });
+          if (res?.finalUrl && res.finalUrl !== targetUrl && !res.finalUrl.includes('getMediaUrlRedirect')) {
+            sendToAgent({ id, status: res.status || 200, finalUrl: res.finalUrl });
+            return;
+          }
+        } catch {}
       }
     }
+  }
+
+  // 2. Fallback: background fetch with flowKey
+  const fetchHeaders = {};
+  if (flowKey) {
+    fetchHeaders['authorization'] = `Bearer ${flowKey}`;
+  }
+
+  try {
+    let resp = await fetch(url, {
+      method: 'GET',
+      headers: fetchHeaders,
+      credentials: 'include',
+    });
+    if (resp.status === 404 && url.includes('/fx/api/trpc/')) {
+      const altUrl = url.replace('/fx/api/trpc/', '/api/trpc/');
+      const altResp = await fetch(altUrl, {
+        method: 'GET',
+        headers: fetchHeaders,
+        credentials: 'include',
+      });
+      if (altResp.ok || altResp.status < 400) {
+        resp = altResp;
+      }
+    }
+    const finalUrl = resp.url || '';
+    await resp.body?.cancel();
+    sendToAgent({ id, status: resp.status, finalUrl });
+  } catch (e) {
+    console.error('[FlowAgent] fetch_redirect failed:', e);
     sendToAgent({ id, error: e.message || 'FETCH_REDIRECT_FAILED' });
   }
 }
@@ -485,9 +504,9 @@ async function handleSolveCaptcha(msg) {
 
 async function handleTrpcRequest(msg) {
   const { id, params } = msg;
-  const { url, method = 'POST', headers = {}, body, responseMode = 'json' } = params;
-
-  if (!url || (!url.startsWith('https://labs.google/') && !url.startsWith('https://flow.google.com/'))) {
+  const { url, method = 'POST', headers = {}, body, responseMode = 'json' } = params || {};
+  let targetUrl = url;
+  if (!targetUrl || (!targetUrl.startsWith('https://labs.google/') && !targetUrl.startsWith('https://flow.google.com/'))) {
     sendToAgent({ id, error: 'INVALID_TRPC_URL' });
     return;
   }
@@ -496,7 +515,7 @@ async function handleTrpcRequest(msg) {
   // TRPC calls don't consume captcha — don't count in metrics
 
   const logId = id;
-  const logType = url.includes('createProject') ? 'CREATE_PROJECT' : 'TRPC';
+  const logType = targetUrl.includes('createProject') ? 'CREATE_PROJECT' : 'TRPC';
   // TRPC calls are silent — don't show in request log
 
   const fetchHeaders = { 'Content-Type': 'application/json', ...headers };
@@ -505,12 +524,24 @@ async function handleTrpcRequest(msg) {
   }
 
   try {
-    const resp = await fetch(url, {
+    let resp = await fetch(targetUrl, {
       method,
       headers: fetchHeaders,
-      body: body ? JSON.stringify(body) : undefined,
+      body: (body && method !== 'GET') ? JSON.stringify(body) : undefined,
       credentials: 'include',
     });
+    if (resp.status === 404 && targetUrl.includes('/fx/api/trpc/')) {
+      const altUrl = targetUrl.replace('/fx/api/trpc/', '/api/trpc/');
+      const altResp = await fetch(altUrl, {
+        method,
+        headers: fetchHeaders,
+        body: (body && method !== 'GET') ? JSON.stringify(body) : undefined,
+        credentials: 'include',
+      });
+      if (altResp.ok || altResp.status < 400) {
+        resp = altResp;
+      }
+    }
     let data;
     if (responseMode === 'url') {
       // fetch() has already followed the authenticated Flow redirect. Return
@@ -522,7 +553,11 @@ async function handleTrpcRequest(msg) {
       };
       await resp.body?.cancel();
     } else {
-      data = await resp.json();
+      try {
+        data = await resp.json();
+      } catch {
+        data = { text: await resp.text().catch(() => '') };
+      }
     }
     chrome.storage.local.set({ metrics });
     updateRequestLog(logId, { status: 'success' });

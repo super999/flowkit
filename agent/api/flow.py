@@ -476,15 +476,19 @@ async def upscale_image(body: UpscaleImageRequest):
 
 @router.post("/test-resolve-media")
 async def test_resolve_media(body: dict):
-    """TEMPORARY debug — test fetch_redirect resolution for a media id."""
+    """Debug / verification endpoint — test media url resolution."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    if body.get("action") == "reload_extension":
+        import json
+        if client._extension_ws:
+            await client._extension_ws.send(json.dumps({"method": "reload_extension"}))
+            return {"status": "reloading"}
+        return {"status": "no_ws"}
     media_id = body.get("media_id", "")
-    result = await client._send("fetch_redirect", {
-        "url": f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}",
-    }, timeout=30)
-    return result
+    resolved_url = await client.resolve_media_url(media_id)
+    return {"media_id": media_id, "resolved_url": resolved_url}
 
 
 @router.get("/media/image/download")

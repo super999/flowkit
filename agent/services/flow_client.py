@@ -273,20 +273,6 @@ class FlowClient:
             "uptime_s": uptime,
         }
 
-    async def resolve_media_url(self, media_id: str) -> str:
-        """Resolve a media id to its real signed URL via the extension.
-
-        The Flow web UI serves images through media.getMediaUrlRedirect, which
-        302-redirects to the actual CDN URL. The extension follows the redirect
-        and reports the final URL (cross-origin body is opaque, URL is enough).
-        """
-        url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}"
-        result = await self._send("fetch_redirect", {"url": url}, timeout=30)
-        final = result.get("finalUrl", "")
-        if not final or final == url or final.endswith(media_id):
-            return ""
-        return final
-
     async def _handle_page_scan(self, detail: dict):
         """Resolve media ids reported by the page scan into real URLs (flow_media)."""
         from agent.db import crud
@@ -913,13 +899,23 @@ class FlowClient:
         if not media_id:
             return ""
 
-        # 1. Try getMediaUrlRedirect via extension
+        from urllib.parse import quote
+
+        # 1. Try trpc_request with responseMode="url" via extension background
         try:
-            url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}"
-            res = await self._send("fetch_redirect", {"url": url}, timeout=timeout)
+            url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={quote(media_id, safe='')}"
+            res = await self._send("trpc_request", {
+                "url": url,
+                "method": "GET",
+                "headers": {"content-type": "application/json"},
+                "responseMode": "url",
+            }, timeout=timeout)
+            logger.info("resolve_media_url trpc_request raw for %s: %s", media_id, res)
             if isinstance(res, dict):
-                final_url = res.get("finalUrl", "")
+                data = res.get("data", {})
+                final_url = data.get("url", "") if isinstance(data, dict) else ""
                 status = res.get("status", 200)
+                logger.info("resolve_media_url trpc_request parsed: status=%s, final_url=%s", status, final_url)
                 if status == 200 and final_url and (
                     final_url.startswith("https://flow-content.google") or
                     "storage.googleapis.com" in final_url or
@@ -927,23 +923,25 @@ class FlowClient:
                 ):
                     return final_url
         except Exception as e:
-            logger.debug("resolve_media_url fetch_redirect failed for %s: %s", media_id, e)
+            logger.warning("resolve_media_url trpc_request failed for %s: %s", media_id, e)
 
-        # 2. Fallback: Query media metadata directly via Flow REST API (get_media)
+        # 2. Fallback: Try fetch_redirect via extension
         try:
-            res_meta = await self.get_media(media_id)
-            if isinstance(res_meta, dict):
-                data = res_meta.get("data", {})
-                if isinstance(data, dict):
-                    fife = (
-                        data.get("fifeUrl") or data.get("servingUri") or
-                        data.get("image", {}).get("fifeUrl") or data.get("image", {}).get("servingUri") or
-                        data.get("video", {}).get("downloadUrl") or data.get("video", {}).get("fifeUrl")
-                    )
-                    if fife and (fife.startswith("https://flow-content.google") or "storage.googleapis.com" in fife or "googleusercontent.com" in fife):
-                        return fife
+            url = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={quote(media_id, safe='')}"
+            res = await self._send("fetch_redirect", {"url": url}, timeout=timeout)
+            logger.info("resolve_media_url fetch_redirect raw for %s: %s", media_id, res)
+            if isinstance(res, dict):
+                final_url = res.get("finalUrl", "")
+                status = res.get("status", 200)
+                logger.info("resolve_media_url fetch_redirect parsed: status=%s, final_url=%s", status, final_url)
+                if status == 200 and final_url and (
+                    final_url.startswith("https://flow-content.google") or
+                    "storage.googleapis.com" in final_url or
+                    "googleusercontent.com" in final_url
+                ):
+                    return final_url
         except Exception as e:
-            logger.debug("resolve_media_url get_media fallback failed for %s: %s", media_id, e)
+            logger.warning("resolve_media_url fetch_redirect failed for %s: %s", media_id, e)
 
         return ""
 

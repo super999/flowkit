@@ -180,10 +180,11 @@ async def ext_callback(request: Request):
     data = await request.json()
     client = get_flow_client()
     req_id = data.get("id")
-    logger.info("ext/callback: id=%s pending=%d match=%s",
+    logger.info("ext/callback: id=%s pending=%d match=%s payload=%s",
                 str(req_id)[:8] if req_id else "none",
                 len(client._pending),
-                "yes" if req_id and req_id in client._pending else "no")
+                "yes" if req_id and req_id in client._pending else "no",
+                json.dumps(data)[:300])
     if req_id and req_id in client._pending:
         future = client._pending[req_id]
         try:

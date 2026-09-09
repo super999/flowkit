@@ -152,10 +152,10 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
             p_title = p_info["title"]
             async with sem:
                 try:
-                    # 8s timeout per project to prevent one dead project hanging the whole sync
+                    # 25s timeout per project to allow reliable tRPC response without false timeouts
                     media_items = await asyncio.wait_for(
                         client.fetch_project_media(pid, limit=150),
-                        timeout=8.0
+                        timeout=25.0
                     )
                     if not media_items:
                         return 0, False
