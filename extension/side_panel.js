@@ -96,8 +96,8 @@ function updateStatus(data) {
       chrome.runtime.sendMessage({ type: 'REFRESH_TOKEN' });
     }
   } else {
-    tokenEl.textContent = 'no token';
-    tokenEl.className = 'bad';
+    tokenEl.textContent = 'page session — keep Google Flow signed in';
+    tokenEl.className = 'warn';
   }
 
   // Metrics

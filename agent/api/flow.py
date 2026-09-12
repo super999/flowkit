@@ -5,6 +5,7 @@ from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from typing import Literal, Optional
 
+from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
 from agent.services.flow_client import get_flow_client
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -101,10 +102,17 @@ class EditImageRequest(BaseModel):
 
 @router.get("/status")
 async def extension_status():
-    """Check if extension is connected."""
+    """Extension health, and which transport it is being asked to speak.
+
+    `flow_key_present` is a legacy-path signal: the batchexecute path has no
+    bearer token at all, so false is expected there rather than a fault.
+    """
     client = get_flow_client()
     return {
         "connected": client.connected,
+        "transport": "batch" if USE_BATCH_RPC else "legacy_rest",
+        "flow_project_id": FLOW_PROJECT_ID or None,
+        "allow_degraded": FLOW_ALLOW_DEGRADED,
         "flow_key_present": client._flow_key is not None,
     }
 
@@ -506,7 +514,7 @@ async def download_image(url: str = "", media_id: str | None = None, name: str =
     # 1. Check media_id in local cache
     if media_id:
         cache_file = get_cached_image_path(media_id)
-        if cache_file.exists() and cache_file.stat().st_size > 0:
+        if cache_file and cache_file.exists() and cache_file.stat().st_size > 0:
             return FileResponse(
                 str(cache_file),
                 media_type="image/jpeg",
