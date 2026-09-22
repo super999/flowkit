@@ -560,7 +560,10 @@ const MAX_RPC_TEXT = 32000000; // the project listing alone is past 17 MB
 
 async function runBatchRpc(cmd) {
   const tabs = await chrome.tabs.query({ url: flowUrls });
-  let candidate = tabs.find((t) => !t.discarded) || tabs[0];
+  // An explicitly marked work tab isolates long generations from navigation
+  // in the user's editing tab. Default selection stays unchanged otherwise.
+  let candidate = tabs.find((t) => !t.discarded && new URL(t.url).searchParams.get('flowkit_batch_worker') === '1')
+    || tabs.find((t) => !t.discarded) || tabs[0];
   if (!candidate) {
     // No Flow tab — open one and give the app a moment to boot, otherwise
     // WIZ_global_data is not on the page yet and `at` comes back empty.
