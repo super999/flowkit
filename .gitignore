@@ -26,4 +26,8 @@ ds-bundle/
 extension/_metadata/
 dashboard/dist/
 *.log
-*.pid
+*.pid
+
+# Agent session state and local crash dumps
+.omc/
+*.stackdump

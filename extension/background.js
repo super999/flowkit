@@ -8,8 +8,10 @@
  * `Bearer ya29.…` the old REST host needed. The current path is `batch_rpc`:
  * the agent builds an `f.req` envelope, this worker mints a captcha for it and
  * runs the POST in the page's MAIN world, where the `at` CSRF token lives.
- * The bearer capture and `api_request` proxy below are the legacy path, kept
- * for USE_BATCH_RPC=0 and for an old pinned labs.google tab.
+ * The bearer capture and the `api_request` / `trpc_request` proxies below are
+ * the pre-migration path. The agent no longer sends either — it speaks only
+ * `batch_rpc`. They stay so an extension updated ahead of its agent keeps
+ * serving an older one; remove them once no agent in the wild sends them.
  */
 
 const AGENT_WS_URL = 'ws://127.0.0.1:9223';
@@ -92,7 +94,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'reconnect') connectToAgent();
   if (alarm.name === 'keepAlive') keepAlive();
   if (alarm.name === 'token-refresh') {
-    await captureTokenFromFlowTab();
+    // Passive maintenance must never create browser tabs. If the user has no
+    // Flow tab open, wait for an explicit action or an actual RPC to open one.
+    await captureTokenFromFlowTab({ createIfMissing: false });
   }
 });
 
@@ -191,33 +195,42 @@ async function findFlowTab() {
   return null;
 }
 
-async function captureTokenFromFlowTab() {
-  const tabs = await chrome.tabs.query({ url: flowUrls });
+async function captureTokenFromFlowTab({ createIfMissing = false } = {}) {
+  let tabs = await chrome.tabs.query({ url: flowUrls });
   if (!tabs.length) {
+    if (!createIfMissing) {
+      console.log('[FlowAgent] No Flow tab found — passive refresh skipped');
+      return { skipped: 'NO_FLOW_TAB' };
+    }
     if (_openingFlowTab) {
       console.log('[FlowAgent] Flow tab already opening, skipping');
       return;
     }
     _openingFlowTab = true;
     try {
-      console.log('[FlowAgent] No Flow tab found — opening one in background');
-      await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+      console.log('[FlowAgent] No Flow tab found — opening one for explicit refresh');
+      const opened = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
       await sleep(3000);
-      const retryTabs = await chrome.tabs.query({ url: flowUrls });
-      if (!retryTabs.length) {
+      const target = opened?.id ? await chrome.tabs.get(opened.id).catch(() => null) : null;
+      if (!target) {
         console.log('[FlowAgent] Flow tab not ready yet after open');
         return;
       }
+      await chrome.scripting.executeScript({
+        target: { tabId: target.id },
+        files: ['content.js'],
+      });
+      console.log('[FlowAgent] Token refresh triggered on newly opened Flow tab');
     } catch (e) {
       console.error('[FlowAgent] Token refresh failed after opening tab:', e);
-      return;
     } finally {
       _openingFlowTab = false;
     }
+    return;
   }
   try {
     await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId: tabs[0].id },
       files: ['content.js'],
     });
     console.log('[FlowAgent] Token refresh triggered on Flow tab');
@@ -253,6 +266,8 @@ function connectToAgent() {
     ws.send(JSON.stringify({
       type: 'extension_ready',
       flowKeyPresent: !!flowKey,
+      extensionVersion: chrome.runtime.getManifest().version,
+      flowUrlSupported: chrome.runtime.getManifest().host_permissions?.includes('https://flow.google.com/*') === true,
       tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
     }));
     if (flowKey) {
@@ -475,16 +490,19 @@ function captchaFromTab(tabId, requestId, captchaAction) {
 async function solveCaptcha(requestId, captchaAction) {
   let tabs = await chrome.tabs.query({ url: flowUrls });
 
-  // No Flow tab at all — spawn one and let it settle.
+  // No Flow tab at all — spawn one and let it settle. Keep the exact tab id:
+  // a redirected or stale tab must not make us select some older candidate.
   if (!tabs.length) {
+    let opened;
     try {
-      await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+      opened = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
       await sleep(3000);
-      tabs = await chrome.tabs.query({ url: flowUrls });
     } catch (e) {
       return { error: e.message || 'NO_FLOW_TAB' };
     }
-    if (!tabs.length) return { error: 'NO_FLOW_TAB' };
+    const target = opened?.id ? await chrome.tabs.get(opened.id).catch(() => null) : null;
+    if (!target) return { error: 'NO_FLOW_TAB' };
+    tabs = [target];
   }
 
   // Try each Flow tab in turn. A tab that answers "no grecaptcha" is a tab
@@ -517,16 +535,25 @@ async function solveCaptcha(requestId, captchaAction) {
     }
   }
 
-  // Every candidate failed — last-ditch, spawn a fresh tab and try it once.
+  // Every candidate failed — last-ditch, spawn a fresh temporary tab and
+  // target THAT exact tab. Previously we re-queried all Flow tabs and picked
+  // fresh[0], which could select the same stale tab again while leaking the
+  // newly-created one on every retry.
+  let recoveryTab = null;
   try {
-    await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+    recoveryTab = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
     await sleep(3000);
-    const fresh = await chrome.tabs.query({ url: flowUrls });
-    const target = fresh.find((t) => !t.discarded) || fresh[0];
-    if (!target) return { error: 'NO_FLOW_TAB' };
+    const target = await chrome.tabs.get(recoveryTab.id);
+    if (!target || target.discarded) return { error: 'NO_FLOW_TAB' };
     return await captchaFromTab(target.id, requestId, captchaAction);
   } catch (e) {
     return { error: e?.message || errors[0] || 'NO_FLOW_TAB' };
+  } finally {
+    // A recovery tab is disposable: there were already Flow tabs available
+    // for the signed RPC. Do not let CAPTCHA retries accumulate root tabs.
+    if (recoveryTab?.id) {
+      try { await chrome.tabs.remove(recoveryTab.id); } catch { /* already gone */ }
+    }
   }
 }
 
@@ -566,12 +593,13 @@ async function runBatchRpc(cmd) {
     || tabs.find((t) => !t.discarded) || tabs[0];
   if (!candidate) {
     // No Flow tab — open one and give the app a moment to boot, otherwise
-    // WIZ_global_data is not on the page yet and `at` comes back empty.
+    // WIZ_global_data is not on the page yet and `at` comes back empty. Keep
+    // the exact created tab id so redirects/stale tabs cannot hijack recovery.
+    let opened;
     try {
-      await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
+      opened = await chrome.tabs.create({ url: FLOW_TAB_URL, active: false });
       await sleep(5000);
-      const fresh = await chrome.tabs.query({ url: flowUrls });
-      candidate = fresh.find((t) => !t.discarded) || fresh[0];
+      candidate = opened?.id ? await chrome.tabs.get(opened.id).catch(() => null) : null;
     } catch (e) {
       return { error: e?.message || 'NO_FLOW_TAB' };
     }
@@ -599,10 +627,15 @@ async function runBatchRpc(cmd) {
       const bl = wiz.cfb2h;
       if (!at) return { error: 'NO_AT_TOKEN' };
       const reqid = Math.floor(Math.random() * 900000) + 100000;
+      // Match Flow's own WIZ metadata. GEM_PIX_2 (Nano Banana Pro) rejects
+      // image generation when source-path is missing even though Lite may not.
+      const sourcePath = location.pathname || '/';
+      const hl = (document.documentElement.lang || navigator.language || 'en').split('-')[0];
       const url =
         `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
-        `&f.sid=${encodeURIComponent(sid || '')}&bl=${encodeURIComponent(bl || '')}` +
-        `&hl=en-AU&_reqid=${reqid}&rt=c`;
+        `&source-path=${encodeURIComponent(sourcePath)}` +
+        `&bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
+        `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`;
       const resp = await fetch(url, {
         method: 'POST',
         credentials: 'include',
@@ -752,8 +785,12 @@ async function handleTrpcRequest(msg) {
   }
 }
 
-// Legacy REST proxy against aisandbox-pa. Reachable only with USE_BATCH_RPC=0
-// on a profile that still holds a `Bearer ya29.…`; Flow stopped minting those.
+// Legacy REST proxy against aisandbox-pa. No current agent sends `api_request`;
+// kept only so an extension updated ahead of its agent still serves an older
+// one. It needs a `Bearer ya29.…` that Flow stopped minting, so it 401s on any
+// post-migration profile — as does sendTelemetry below, which early-returns
+// without a flowKey. Nothing here reaches aisandbox-pa any more; when the
+// oldest agent in the wild speaks batch_rpc, this and the host permission go.
 async function handleApiRequest(msg) {
   const { id, params } = msg;
   const { url, method, headers, body, captchaAction } = params;
@@ -943,7 +980,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   }
 
   if (msg.type === 'REFRESH_TOKEN') {
-    captureTokenFromFlowTab()
+    captureTokenFromFlowTab({ createIfMissing: true })
       .then(() => reply({ ok: true }))
       .catch((e) => reply({ error: e.message }));
     return true;

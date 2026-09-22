@@ -16,9 +16,7 @@ import LogsPage from './pages/LogsPage'
 import GalleryPage from './pages/GalleryPage'
 import GuidePage from './pages/GuidePage'
 import Txt2ImgPage from './pages/Txt2ImgPage'
-
-
-
+import ProviderSettingsPage from './pages/SettingsPage'
 
 const BREADCRUMB_TAB_KEY: Record<string, TranslationKey> = {
   overview: 'app.breadcrumbTab.overview',
@@ -62,7 +60,7 @@ function useBreadcrumbs() {
   else if (loc.pathname.startsWith('/logs')) crumbs.push(t('app.breadcrumb.logs'))
   else if (loc.pathname.startsWith('/guide')) crumbs.push(t('app.breadcrumb.guide'))
   else if (loc.pathname.startsWith('/settings')) {
-    crumbs.push('系统设置')
+    crumbs.push(t('app.breadcrumb.settings'))
     if (loc.pathname.includes('/llm-test')) crumbs.push('LLM 接口测试')
     else if (loc.pathname.includes('/llm')) crumbs.push('大语言模型')
   }
@@ -88,7 +86,7 @@ function LanguageSwitcher() {
 
 import ImageStudioPage from './pages/studio/ImageStudioPage'
 import ReferenceLibraryPage from './pages/studio/ReferenceLibraryPage'
-import SettingsPage from './pages/settings/SettingsPage'
+import LegacySettingsPage from './pages/settings/SettingsPage'
 import LLMTestPage from './pages/settings/LLMTestPage'
 import { Sparkles, Image as ImageIcon, Users, Zap, Settings, BrainCircuit, FlaskConical, BookOpen } from 'lucide-react'
 
@@ -296,10 +294,9 @@ function Layout() {
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/guide" element={<GuidePage />} />
             <Route path="/txt2img" element={<Txt2ImgPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/settings/llm" element={<SettingsPage />} />
+            <Route path="/settings" element={<ProviderSettingsPage />} />
+            <Route path="/settings/llm" element={<LegacySettingsPage />} />
             <Route path="/settings/llm-test" element={<LLMTestPage />} />
-
           </Routes>
         </main>
       </div>

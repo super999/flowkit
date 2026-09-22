@@ -4,15 +4,18 @@ Flow Client — communicates with Google Flow via the Chrome extension bridge.
 Agent runs a WS server. Extension connects as client. Agent sends requests,
 extension executes them in browser context (residential IP, cookies, reCAPTCHA).
 
-Two transports live here. The current one is Flow's ``batchexecute`` endpoint on
-flow.google.com, whose calls only a signed-in page can sign — the agent builds
-the envelope, the extension runs it in the tab (see :mod:`agent.services.flow_batch`).
-The old REST path against ``aisandbox-pa.googleapis.com`` is kept behind
-``USE_BATCH_RPC=0``; it needs a ``Bearer ya29.…`` that Flow stopped minting in
-the September 2026 migration, so it is a post-mortem tool, not a fallback.
+One transport: Flow's ``batchexecute`` endpoint on flow.google.com, whose calls
+only a signed-in page can sign — the agent builds the envelope, the extension
+runs it in the tab (see :mod:`agent.services.flow_batch`).
 
-Both shape their answers the same way, so everything downstream — the worker's
-parsers, the operation poller, the scene/character updaters — is transport-blind.
+The REST path against ``aisandbox-pa.googleapis.com`` that preceded it is gone.
+It needed a ``Bearer ya29.…`` that Flow stopped minting in the September 2026
+migration, so it could not run; keeping it only gave the next contributor a
+second place to implement things. Git history has it if a payload is ever needed.
+
+Answers are shaped like the old REST ones, so everything downstream — the
+worker's parsers, the operation poller, the scene/character updaters — reads one
+shape and never learns where it came from.
 """
 import asyncio
 import json
@@ -20,18 +23,15 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 from agent.config import (
-    GOOGLE_FLOW_API, GOOGLE_API_KEY, ENDPOINTS,
-    VIDEO_MODELS, UPSCALE_MODELS, IMAGE_MODELS, VIDEO_POLL_TIMEOUT,
-    USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
+    VIDEO_MODELS,
+    FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
-from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
 
@@ -69,26 +69,14 @@ def clean_flow_prompt_text(p: str) -> str:
     return p
 
 
-def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Optional[str]]:
-    """Extract (original_prompt, translated_prompt) from Flow media and workflow.
-
-    Returns:
-        (original_prompt, translated_prompt):
-        - original_prompt: user's original input (e.g. Chinese) or primary prompt
-        - translated_prompt: translated English prompt if different, else None
-    """
-    # The September 2026 batchexecute response is positional rather than the
-    # old REST-shaped object.  A generated media record looks like
-    # ``[media_id, project_id, workflow_id, status, ..., meta, details]``.
-    # Keep this parser here so callers that already use the public helper get
-    # the same prompt recovery as the project-media synchronizer.
+def extract_prompt_pair_from_media(item: dict | list, wf: dict = None) -> tuple[str, Optional[str]]:
+    """Extract original and translated prompts from REST or wire media data."""
     if isinstance(item, (list, tuple)):
         return _extract_wire_prompt_pair(item, wf)
 
     meta = item.get("mediaMetadata", {}) or item.get("metadata", {}) if isinstance(item, dict) else {}
     req_data = meta.get("requestData", {}) if isinstance(meta, dict) else {}
     prompt_inputs = req_data.get("promptInputs", []) if isinstance(req_data, dict) else []
-
     orig_prompt = ""
     trans_prompt = ""
 
@@ -98,7 +86,7 @@ def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Op
             sp = pi.get("structuredPrompt", {})
             if isinstance(sp, dict):
                 parts = sp.get("parts", [])
-                if parts and isinstance(parts, list):
+                if isinstance(parts, list):
                     texts = [p.get("text", "").strip() for p in parts if isinstance(p, dict) and p.get("text")]
                     if texts:
                         orig_prompt = "".join(texts).strip()
@@ -109,7 +97,7 @@ def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Op
         if media_title:
             orig_prompt = media_title
         elif wf and isinstance(wf, dict):
-            wf_meta = wf.get("metadata", {}) or wf.get("mediaMetadata", {}) if isinstance(wf, dict) else {}
+            wf_meta = wf.get("metadata", {}) or wf.get("mediaMetadata", {})
             wf_disp = wf_meta.get("displayName", "").strip() if isinstance(wf_meta, dict) else ""
             wf_user = wf.get("userPrompt", "").strip()
             orig_prompt = wf_user or wf_disp
@@ -118,40 +106,45 @@ def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Op
     vid = item.get("video", {}) or (wf.get("video", {}) if isinstance(wf, dict) else {})
     gen_img = img.get("generatedImage", {}) if isinstance(img, dict) else {}
     gen_vid = vid.get("generatedVideo", {}) if isinstance(vid, dict) else {}
-
     model_prompt = (
         gen_img.get("prompt", "") or gen_vid.get("prompt", "") or
         (img.get("prompt", "") if isinstance(img, dict) else "") or
         (vid.get("prompt", "") if isinstance(vid, dict) else "") or
         (wf.get("prompt", "") if isinstance(wf, dict) else "")
     ).strip()
-
     if not trans_prompt and model_prompt:
         trans_prompt = model_prompt
-
     cleaned_trans = clean_flow_prompt_text(trans_prompt)
     cleaned_orig = clean_flow_prompt_text(orig_prompt)
-
     if cleaned_orig and cleaned_trans and cleaned_orig != cleaned_trans:
         return cleaned_orig, cleaned_trans
-    elif cleaned_orig:
+    if cleaned_orig:
         return cleaned_orig, None
-    elif cleaned_trans:
+    if cleaned_trans:
         return cleaned_trans, None
-    elif model_prompt:
-        cleaned_model = clean_flow_prompt_text(model_prompt)
-        return cleaned_model, None
+    if model_prompt:
+        return clean_flow_prompt_text(model_prompt), None
     return "", None
 
 
-def _extract_wire_prompt_pair(item: list | tuple, wf: Any = None) -> tuple[str, Optional[str]]:
-    """Read original/translated prompts from a positional Flow media record.
+def _first_wire_text(value: Any) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list):
+        for child in value:
+            text = _first_wire_text(child)
+            if text:
+                return text
+    if isinstance(value, dict):
+        for child in value.values():
+            text = _first_wire_text(child)
+            if text:
+                return text
+    return ""
 
-    Current Flow stores the user's text in ``meta[6][2]`` and the translated
-    model prompt in ``details[0][7]``.  These indexes are intentionally kept
-    in one small function because the surrounding record is a positional
-    protobuf-like array and is easy to mistake for the older listing shape.
-    """
+
+def _extract_wire_prompt_pair(item: list | tuple, wf: Any = None) -> tuple[str, Optional[str]]:
+    """Read original/translated prompts from Flow's positional media record."""
     meta = item[5] if len(item) > 5 else None
     details = item[6] if len(item) > 6 else None
     video_details = item[7] if len(item) > 7 else None
@@ -161,8 +154,7 @@ def _extract_wire_prompt_pair(item: list | tuple, wf: Any = None) -> tuple[str, 
     translated = ""
 
     if isinstance(meta, list) and len(meta) > 6:
-        # Video records keep the complete user prompt in meta[1].  Image
-        # records use the structured prompt block below instead.
+        # Video records carry the complete original prompt in meta[1].
         if isinstance(video_details, list) and len(meta) > 1 and isinstance(meta[1], str):
             original = meta[1].strip()
         prompt_meta = meta[6]
@@ -188,14 +180,12 @@ def _extract_wire_prompt_pair(item: list | tuple, wf: Any = None) -> tuple[str, 
 
     if isinstance(details, list) and details:
         first_detail = details[0]
-        if isinstance(first_detail, list) and len(first_detail) > 7:
-            candidate = first_detail[7]
-            if isinstance(candidate, str):
-                translated = candidate.strip()
+        if isinstance(first_detail, list) and len(first_detail) > 7 and isinstance(first_detail[7], str):
+            translated = first_detail[7].strip()
 
-    # Upload records have no prompt block.  Do not use the workflow display
-    # title as a prompt: it is only a generated filename/title and would make
-    # the media detail panel show misleading prompt text.
+    # Workflow titles are names, not prompts.  Only decoded REST workflow
+    # metadata is allowed as a fallback here; positional workflow titles stay
+    # separate and are used for the media name by fetch_project_media().
     if not original and isinstance(wf, dict):
         original = (
             str(wf.get("userPrompt") or "").strip()
@@ -213,38 +203,16 @@ def _extract_wire_prompt_pair(item: list | tuple, wf: Any = None) -> tuple[str, 
     return "", None
 
 
-def _first_wire_text(value: Any) -> str:
-    """Return the first non-empty text leaf from nested Flow prompt slots."""
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    if isinstance(value, list):
-        for child in value:
-            text = _first_wire_text(child)
-            if text:
-                return text
-    if isinstance(value, dict):
-        for child in value.values():
-            text = _first_wire_text(child)
-            if text:
-                return text
-    return ""
-
-
 def _is_flow_uuid(value: Any) -> bool:
-    """Return whether *value* is a canonical Flow media/workflow UUID."""
-    # FlowClient is defined below this helper; lookup happens when called after
-    # module import has completed.
     return isinstance(value, str) and FlowClient._UUID_RE.match(value) is not None
 
 
 def _wire_timestamp(value: Any) -> Optional[str]:
-    """Convert Flow's ``[unix_seconds, nanos]`` timestamp to ISO UTC text."""
     if isinstance(value, (list, tuple)) and value:
         value = value[0]
     if not isinstance(value, (int, float)):
         return value if isinstance(value, str) and value else None
     seconds = float(value)
-    # Be tolerant of the millisecond form seen in a few older records.
     if seconds > 10_000_000_000:
         seconds /= 1000
     try:
@@ -254,13 +222,11 @@ def _wire_timestamp(value: Any) -> Optional[str]:
 
 
 def _wire_workflow_index(payload: Any) -> tuple[dict[str, dict], dict[str, dict]]:
-    """Index workflow titles by workflow id and by their linked media id."""
     by_workflow: dict[str, dict] = {}
     by_media: dict[str, dict] = {}
     workflows = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
     if not isinstance(workflows, list):
         return by_workflow, by_media
-
     for workflow in workflows:
         if not isinstance(workflow, (list, tuple)):
             continue
@@ -277,7 +243,6 @@ def _wire_workflow_index(payload: Any) -> tuple[dict[str, dict], dict[str, dict]
 
 
 def _wire_media_entries(payload: Any):
-    """Yield current positional media records from a project-media payload."""
     direct = payload[2] if isinstance(payload, list) and len(payload) > 2 else None
     if isinstance(direct, list):
         for entry in direct:
@@ -295,16 +260,12 @@ def _wire_media_entries(payload: Any):
 
 
 def _wire_urls(entry: list | tuple) -> tuple[str, str]:
-    """Return the best embedded video/image URL from a media record."""
     urls: list[str] = []
 
     def add(value: Any):
         if isinstance(value, str) and value.startswith("https://") and value not in urls:
             urls.append(value)
 
-    # The media record carries its own URL in these slots.  Restrict the first
-    # pass to them so a reference image URL nested in prompt metadata cannot be
-    # mistaken for this record's poster.
     meta = entry[5] if len(entry) > 5 else None
     if isinstance(meta, list):
         for index in (5, 10):
@@ -313,11 +274,9 @@ def _wire_urls(entry: list | tuple) -> tuple[str, str]:
 
     details = entry[6] if len(entry) > 6 else None
     if isinstance(details, list):
-        # User uploads put the original image at details[1][3].
         upload_detail = details[1] if len(details) > 1 else None
         if isinstance(upload_detail, list) and len(upload_detail) > 3:
             add(upload_detail[3])
-        # Generated video/image URLs may be nested under the details block.
         for text in fb._walk_strings(details):
             add(text)
 
@@ -329,23 +288,16 @@ def _wire_urls(entry: list | tuple) -> tuple[str, str]:
     video = next((url for url in urls if "/video/" in url), "")
     image = next((url for url in urls if "/image/" in url), "")
     if not image:
-        # Upload records use lh3 rather than Flow's /image/<uuid> CDN path.
         image = next((url for url in urls if "googleusercontent.com" in url), "")
     return video, image
 
 
 def _wire_is_video(entry: list | tuple) -> bool:
-    """Video records carry a dedicated details block at positional slot 7."""
     video_details = entry[7] if len(entry) > 7 else None
-    return (
-        isinstance(video_details, list)
-        and bool(video_details)
-        and isinstance(video_details[0], list)
-    )
+    return isinstance(video_details, list) and bool(video_details) and isinstance(video_details[0], list)
 
 
 def _wire_aspect(details: Any, media_type: str) -> str:
-    """Map Flow's numeric aspect slot to the names used by the local schema."""
     value = None
     if isinstance(details, list) and details:
         first = details[0]
@@ -366,12 +318,24 @@ def _wire_aspect(details: Any, media_type: str) -> str:
 
 
 def _wire_model_name(details: Any) -> str:
-    """Read a named video model without guessing numeric image model enums."""
     if isinstance(details, list) and details:
         first = details[0]
         if isinstance(first, list) and len(first) > 12 and isinstance(first[12], str):
             return first[12]
     return ""
+
+# Captured from the current Flow image composer. x4 launches independent
+# ogiZ0b requests at roughly 0.0s, 0.5s, 1.5s and 2.5s rather than bursting
+# all variants at once. The generation work still overlaps after submission.
+IMAGE_UI_SUBMIT_OFFSETS_S = (0.0, 0.5, 1.5, 2.5)
+
+# RPC [8] is a transient Flow-side generation rejection seen under image load.
+# A short 6s retry was still rejected in live testing, so use one bounded
+# cooldown retry rather than hot-looping or multiplying duplicate generations.
+# This is FlowKit resilience policy; the current UI was not observed to retry
+# automatically after the same failure.
+IMAGE_TRANSIENT_RETRY_DELAY_S = 34.0
+IMAGE_TRANSIENT_MAX_ATTEMPTS = 2
 
 
 class FlowClient:
@@ -402,6 +366,8 @@ class FlowClient:
             "connected_at": time.time(),
             "flow_key": None,
             "token_captured_at": None,
+            "extension_version": None,
+            "flow_url_supported": None,
             "unavailable_until": 0,
         }
         # A new unauthenticated profile must not displace an already
@@ -525,6 +491,16 @@ class FlowClient:
         uptime = None
         if self._ws_connected_at and self.connected:
             uptime = int(time.time() - self._ws_connected_at)
+        versions = sorted({
+            str(session["extension_version"])
+            for session in self._extensions.values()
+            if session.get("extension_version")
+        })
+        flow_url_support = [
+            session.get("flow_url_supported")
+            for session in self._extensions.values()
+            if session.get("flow_url_supported") is not None
+        ]
         return {
             "connected": self.connected,
             "active_connections": len(self._extensions),
@@ -532,55 +508,12 @@ class FlowClient:
                 1 for session in self._extensions.values()
                 if session.get("flow_key")
             ),
+            "extension_versions": versions,
+            "flow_url_supported": all(flow_url_support) if flow_url_support else None,
             "connects": self._ws_connect_count,
             "disconnects": self._ws_disconnect_count,
             "uptime_s": uptime,
         }
-
-    async def _handle_page_scan(self, detail: dict):
-        """Resolve media ids reported by the page scan into real URLs (flow_media)."""
-        from agent.db import crud
-
-        media_ids = detail.get("mediaIds") or []
-        if not media_ids:
-            return
-        try:
-            existing = {r["media_id"] for r in await crud.list_flow_media()}
-        except Exception:
-            existing = set()
-
-        todo = [mid for mid in media_ids if mid not in existing]
-        if not todo:
-            logger.info("Page scan: all %d media already in library", len(media_ids))
-            return
-
-        logger.info("Page scan: resolving %d new media ids → flow_media", len(todo))
-        # Resolve in small batches to be gentle on the extension
-        import asyncio as _asyncio
-        for i in range(0, len(todo), 4):
-            batch = todo[i:i + 4]
-            results = await _asyncio.gather(*[
-                self.resolve_media_url(mid) for mid in batch
-            ], return_exceptions=True)
-            for mid, url in zip(batch, results):
-                if isinstance(url, Exception) or not url:
-                    logger.warning("Media %s resolve failed: %s", mid[:12], url if isinstance(url, Exception) else "no final URL")
-                    continue
-                try:
-                    media_type = "video" if "/video/" in url else "image"
-                    await crud.upsert_flow_media(mid, media_type, url)
-                    logger.info("Media %s → %s", mid[:12], url[:60])
-                except Exception as e:
-                    logger.warning("flow_media upsert failed for %s: %s", mid[:12], e)
-            await _asyncio.sleep(1.0)
-        await self._after_media_sync(len(todo))
-
-    async def _after_media_sync(self, count: int):
-        try:
-            from agent.services.event_bus import event_bus
-            await event_bus.emit("media_synced", {"count": count})
-        except Exception:
-            pass
 
     async def handle_message(self, data: dict, websocket=None):
         """Handle incoming message from extension."""
@@ -597,50 +530,23 @@ class FlowClient:
             return
 
         if data.get("type") == "extension_ready":
-            logger.info("Extension ready, flowKey=%s", "yes" if data.get("flowKeyPresent") else "no")
+            source_ws = websocket or self._extension_ws
+            version = data.get("extensionVersion")
+            flow_supported = data.get("flowUrlSupported")
+            if source_ws is not None and source_ws in self._extensions:
+                self._extensions[source_ws]["extension_version"] = version
+                self._extensions[source_ws]["flow_url_supported"] = flow_supported
+            logger.info(
+                "Extension ready, flowKey=%s version=%s flow.google.com=%s",
+                "yes" if data.get("flowKeyPresent") else "no",
+                version or "unknown",
+                "yes" if flow_supported is True else "no" if flow_supported is False else "unknown",
+            )
             asyncio.create_task(self._sync_tier())
             return
 
         if data.get("type") == "media_urls_refresh":
             asyncio.create_task(self._refresh_media_urls(data.get("urls", [])))
-            return
-
-        if data.get("type") == "page_scan_report":
-            # Debug diagnostics + media ids from the extension's DOM media scan
-            try:
-                capture_dir = Path(__file__).parent.parent.parent / "output" / "_shared"
-                capture_dir.mkdir(parents=True, exist_ok=True)
-                cap_file = capture_dir / "page_scan_reports.jsonl"
-                with open(cap_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "ts": datetime.now().isoformat(),
-                        **{k: v for k, v in (data.get("detail") or {}).items() if k != "mediaIds"},
-                        "mediaIds": (data.get("detail") or {}).get("mediaIds", []),
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # Resolve the reported media ids into real URLs
-            asyncio.create_task(self._handle_page_scan(data.get("detail") or {}))
-            return
-
-        if data.get("type") == "api_request_capture":
-            # Raw request payload captured from the Flow web UI (debugging tool)
-            try:
-                url = data.get("url", "")
-                if "upsampleImage" not in url and "batchGenerateImages" not in url and "/api/trpc/" not in url:
-                    return
-                capture_dir = Path(__file__).parent.parent.parent / "output" / "_shared"
-                capture_dir.mkdir(parents=True, exist_ok=True)
-                cap_file = capture_dir / "captured_api_requests.jsonl"
-                with open(cap_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "ts": datetime.now().isoformat(),
-                        "url": url,
-                        "body": data.get("body", ""),
-                    }, ensure_ascii=False) + "\n")
-                logger.info("Captured Flow web API request → output/_shared/captured_api_requests.jsonl")
-            except Exception as e:
-                logger.warning("Failed to save captured API request: %s", e)
             return
 
         if data.get("type") == "pong":
@@ -693,7 +599,6 @@ class FlowClient:
         """Update scene/character URLs in DB from fresh TRPC-captured signed URLs.
 
         Each entry: {mediaId: str, mediaType: 'image'|'video', url: str}
-        Also stores every entry into flow_media (powers the project media library).
         """
         from agent.db import crud
         from agent.services.event_bus import event_bus
@@ -714,12 +619,6 @@ class FlowClient:
                 continue
             if media_type not in ("image", "video"):
                 continue
-
-            # Record into the flow_media library (all project media)
-            try:
-                await crud.upsert_flow_media(media_id, media_type, url)
-            except Exception as e:
-                logger.warning("flow_media upsert failed for %s: %s", media_id[:12], e)
 
             # Try matching against scenes (check both orientations)
             scenes = await crud.list_scenes_by_media_id(media_id)
@@ -760,17 +659,8 @@ class FlowClient:
 
         The batch path can do this properly: the media rpc answers a media id
         with a freshly signed url, so we walk the project's scenes and entities
-        and refresh each id we hold. The legacy path could not — its media
-        endpoint returned base64 content rather than a url — so it still asks
-        the user to open the project in Chrome and let the intercept catch them.
+        and refresh each id we hold.
         """
-        if not USE_BATCH_RPC:
-            logger.info("URL refresh requested for project %s — legacy path has no "
-                        "url-serving media endpoint", project_id[:12])
-            return {"refreshed": 0, "found": 0, "note": "Legacy REST path: no URL refresh. "
-                    "Open the project in Google Flow in Chrome and let the extension "
-                    "intercept fresh URLs, or set USE_BATCH_RPC=1."}
-
         from agent.db import crud
 
         # (media_id, kind) -> the scene/character fields it should land in
@@ -826,14 +716,10 @@ class FlowClient:
         if not self.connected:
             return {"error": "Extension not connected"}
 
-        # A bearer token is only worth routing on when something is going to
-        # send one. The batchexecute path authenticates in the page with the
-        # session cookie, so demanding a flow key there would reject every
-        # profile — no profile on that path ever captures one.
-        needs_token = not USE_BATCH_RPC
-        extension_candidates = self._extension_candidates(require_token=needs_token)
-        if not extension_candidates and needs_token:
-            return {"error": "NO_FLOW_KEY"}
+        # No profile needs a bearer any more: batchexecute authenticates in the
+        # page with the session cookie. Demanding a flow key here would reject
+        # every profile, because none on this path ever captures one.
+        extension_candidates = self._extension_candidates(require_token=False)
         if not extension_candidates:
             return {"error": "Extension not connected"}
 
@@ -880,25 +766,6 @@ class FlowClient:
             return last_result
 
         return last_result
-
-    def _build_url(self, endpoint_key: str, **kwargs) -> str:
-        """Build full API URL."""
-        path = ENDPOINTS[endpoint_key].format(**kwargs)
-        sep = "&" if "?" in path else "?"
-        return f"{GOOGLE_FLOW_API}{path}{sep}key={GOOGLE_API_KEY}"
-
-    def _client_context(self, project_id: str, user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
-        """Build clientContext with recaptcha placeholder."""
-        return {
-            "projectId": str(project_id),
-            "recaptchaContext": {
-                "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-                "token": "",  # Extension injects real token
-            },
-            "sessionId": f";{int(time.time() * 1000)}",
-            "tool": "PINHOLE",
-            "userPaygateTier": user_paygate_tier,
-        }
 
     # ─── batchexecute transport ──────────────────────────────
     #
@@ -978,110 +845,6 @@ class FlowClient:
 
     # ─── High-level API Methods ──────────────────────────────
 
-    async def search_user_projects(self, limit: int = 50, tool_name: str = "PINHOLE") -> list[dict]:
-        """List locally linked projects; the new transport has no project-search RPC."""
-        from agent.db import crud
-        rows = await crud.list_projects()
-        projects = [{"projectId": r["id"], "title": r["name"], "source": "local_link"}
-                    for r in rows]
-        if FLOW_PROJECT_ID and not any(p["projectId"] == FLOW_PROJECT_ID for p in projects):
-            projects.append({"projectId": FLOW_PROJECT_ID, "title": FLOW_PROJECT_ID, "source": "pinned"})
-        return projects[:limit]
-
-    async def get_project(self, project_id: str, tool_name: str = "PINHOLE") -> dict:
-        projects = await self.search_user_projects(limit=10000, tool_name=tool_name)
-        return next((p for p in projects if p["projectId"] == project_id), {})
-
-    async def fetch_project_media(self, project_id: str, limit: int | None = None) -> list[dict]:
-        """Read all current project media over RPC.
-
-        Current Flow returns the complete media set in ``payload[2]``.  It is
-        ordered by UUID rather than creation time, so applying the historical
-        200-item cap silently drops arbitrary media (including newly generated
-        images).  ``limit`` remains available for API callers that explicitly
-        request a view cap; synchronization callers should pass ``None``.
-
-        A generated title is not the original prompt.  Prefer prompt data from
-        the wire record, then preserve local metadata for older records.
-        """
-        from agent.db import crud
-        payload = await self._batch_payload(fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id))
-        cached, _ = await crud.list_media_library(project_id=project_id, limit=10000)
-        by_id = {r["media_id"]: r for r in cached}
-        workflows_by_id, workflows_by_media = _wire_workflow_index(payload)
-        result, seen = [], set()
-
-        # New batchexecute shape: payload[2] contains one complete media record
-        # per image/video.  Parse it before falling back to the old operation
-        # listing shape below.
-        for entry in _wire_media_entries(payload):
-            mid = entry[0]
-            if mid in seen:
-                continue
-            seen.add(mid)
-            old = by_id.get(mid, {})
-            workflow_id = entry[2] if len(entry) > 2 and isinstance(entry[2], str) else ""
-            wf_info = workflows_by_id.get(workflow_id) or workflows_by_media.get(mid) or {}
-            prompt, translated_prompt = extract_prompt_pair_from_media(entry, wf_info.get("workflow"))
-            video_url, image_url = _wire_urls(entry)
-            media_type = "VIDEO" if _wire_is_video(entry) or video_url else (old.get("media_type") or "IMAGE")
-            embedded_url = video_url if media_type == "VIDEO" else (image_url or video_url)
-            fresh_url = embedded_url
-            result.append({
-                "mediaKey": mid,
-                "mediaType": media_type,
-                "prompt": prompt or old.get("prompt") or "",
-                "translated_prompt": translated_prompt or old.get("translated_prompt"),
-                "modelName": _wire_model_name(entry[7] if len(entry) > 7 else None) or old.get("model_name") or "",
-                "aspectRatio": _wire_aspect(
-                    entry[7] if _wire_is_video(entry) else (entry[6] if len(entry) > 6 else None),
-                    media_type,
-                ) or old.get("aspect_ratio") or "",
-                "url": fresh_url or old.get("url") or "",
-                "createTime": _wire_timestamp(entry[5][0] if isinstance(entry[5], list) and entry[5] else None) or old.get("created_at"),
-                "name": prompt or wf_info.get("title") or old.get("name") or f"Flow {media_type} ({mid[:6]})",
-                "source": "batch_project_media",
-            })
-
-        # Legacy listing shape: entries look like
-        # [operation_id, ..., [title, timestamp, ..., media_id]].  Keep this
-        # path for old captures and for any mixed response during migration.
-        for node in fb._walk_lists(payload):
-            if len(node) < 4 or not isinstance(node[0], str) or not self._UUID_RE.match(node[0]):
-                continue
-            detail = node[3]
-            if not isinstance(detail, list) or len(detail) <= 4:
-                continue
-            mid = detail[4]
-            if not isinstance(mid, str) or not self._UUID_RE.match(mid) or mid in seen:
-                continue
-            seen.add(mid)
-            old = by_id.get(mid, {})
-            media_type = old.get("media_type")
-            fresh_url = ""
-            if not media_type:
-                urls = await self._batch_media_urls(mid)
-                media_type = "VIDEO" if urls.video else "IMAGE"
-                fresh_url = urls.video or urls.image or ""
-            result.append({"mediaKey": mid, "mediaType": media_type,
-                           "prompt": old.get("prompt") or "", "translated_prompt": old.get("translated_prompt"),
-                           "modelName": old.get("model_name") or "", "aspectRatio": old.get("aspect_ratio") or "",
-                           "url": fresh_url or old.get("url") or "", "createTime": old.get("created_at"),
-                           "name": old.get("name") or detail[0] or f"Flow {media_type} ({mid[:6]})",
-                           "source": "batch_listing_with_local_metadata"})
-
-        if limit is not None and limit > 0:
-            return result[:limit]
-        return result
-
-    async def fetch_user_history(self, limit: int = 100, history_type: str = "FLOW") -> list[dict]:
-        result = []
-        for project in await self.search_user_projects():
-            result.extend(await self.fetch_project_media(project["projectId"], limit=max(1, limit-len(result))))
-            if len(result) >= limit:
-                break
-        return result[:limit]
-
     def flow_project_id(self, requested: str | None = None) -> str | None:
         """The Flow project to attach a new Flow Kit project to, if any.
 
@@ -1094,19 +857,128 @@ class FlowClient:
         return FLOW_PROJECT_ID or None
 
     async def create_project(self, project_title: str, tool_name: str = "PINHOLE") -> dict:
-        if not USE_BATCH_RPC:
-            return await self._legacy_create_project(project_title, tool_name)
         pid = self.flow_project_id()
         if not pid:
             return {"error": _UNSUPPORTED_CREATE_PROJECT}
         logger.info("Reusing pinned Flow project %s for '%s'", pid[:12], project_title)
         return {"status": 200, "data": {"projectId": pid}}
 
+    async def search_user_projects(self, limit: int = 50, tool_name: str = "PINHOLE") -> list[dict]:
+        """List locally linked projects plus the configured Flow project.
+
+        The current batch frontend has no standalone project-search RPC.  The
+        local project rows are therefore the authoritative names while the
+        pinned Flow uuid remains available for media synchronization.
+        """
+        from agent.db import crud
+
+        rows = await crud.list_projects()
+        projects = [
+            {"projectId": row["id"], "title": row["name"], "source": "local_link"}
+            for row in rows
+        ]
+        if FLOW_PROJECT_ID and not any(item["projectId"] == FLOW_PROJECT_ID for item in projects):
+            projects.append({"projectId": FLOW_PROJECT_ID, "title": FLOW_PROJECT_ID, "source": "pinned"})
+        return projects[:limit]
+
+    async def get_project(self, project_id: str, tool_name: str = "PINHOLE") -> dict:
+        projects = await self.search_user_projects(limit=10000, tool_name=tool_name)
+        return next((project for project in projects if project["projectId"] == project_id), {})
+
+    async def fetch_project_media(self, project_id: str, limit: int | None = None) -> list[dict]:
+        """Read complete current media records from ``Zzl0ze``.
+
+        Flow returns media in ``payload[2]`` ordered by UUID.  A historical
+        200-item cap therefore drops arbitrary records, so synchronization
+        callers should leave ``limit`` as ``None``.
+        """
+        from agent.db import crud
+
+        payload = await self._batch_payload(fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id))
+        cached, _ = await crud.list_media_library(project_id=project_id, limit=10000)
+        by_id = {row["media_id"]: row for row in cached}
+        workflows_by_id, workflows_by_media = _wire_workflow_index(payload)
+        result, seen = [], set()
+
+        for entry in _wire_media_entries(payload):
+            media_id = entry[0]
+            if media_id in seen:
+                continue
+            seen.add(media_id)
+            old = by_id.get(media_id, {})
+            workflow_id = entry[2] if len(entry) > 2 and isinstance(entry[2], str) else ""
+            workflow = workflows_by_id.get(workflow_id) or workflows_by_media.get(media_id) or {}
+            prompt, translated = extract_prompt_pair_from_media(entry, workflow.get("workflow"))
+            video_url, image_url = _wire_urls(entry)
+            media_type = "VIDEO" if _wire_is_video(entry) or video_url else (old.get("media_type") or "IMAGE")
+            embedded_url = video_url if media_type == "VIDEO" else (image_url or video_url)
+            result.append({
+                "mediaKey": media_id,
+                "mediaType": media_type,
+                "prompt": prompt or old.get("prompt") or "",
+                "translated_prompt": translated or old.get("translated_prompt"),
+                "modelName": _wire_model_name(entry[7] if len(entry) > 7 else None) or old.get("model_name") or "",
+                "aspectRatio": _wire_aspect(
+                    entry[7] if _wire_is_video(entry) else (entry[6] if len(entry) > 6 else None),
+                    media_type,
+                ) or old.get("aspect_ratio") or "",
+                "url": embedded_url or old.get("url") or "",
+                "createTime": _wire_timestamp(entry[5][0] if isinstance(entry[5], list) and entry[5] else None) or old.get("created_at"),
+                "name": prompt or workflow.get("title") or old.get("name") or f"Flow {media_type} ({media_id[:6]})",
+                "source": "batch_project_media",
+            })
+
+        # Legacy operation-listing shape remains useful during migration and
+        # for old captures; new direct media records have already been seen.
+        for node in fb._walk_lists(payload):
+            if len(node) < 4 or not isinstance(node[0], str) or not self._UUID_RE.match(node[0]):
+                continue
+            detail = node[3]
+            if not isinstance(detail, list) or len(detail) <= 4:
+                continue
+            media_id = detail[4]
+            if not isinstance(media_id, str) or not self._UUID_RE.match(media_id) or media_id in seen:
+                continue
+            seen.add(media_id)
+            old = by_id.get(media_id, {})
+            media_type = old.get("media_type") or "IMAGE"
+            fresh_url = old.get("url") or ""
+            if not old.get("media_type"):
+                urls = await self._batch_media_urls(media_id)
+                media_type = "VIDEO" if urls.video else "IMAGE"
+                fresh_url = urls.video or urls.image or fresh_url
+            result.append({
+                "mediaKey": media_id,
+                "mediaType": media_type,
+                "prompt": old.get("prompt") or "",
+                "translated_prompt": old.get("translated_prompt"),
+                "modelName": old.get("model_name") or "",
+                "aspectRatio": old.get("aspect_ratio") or "",
+                "url": fresh_url,
+                "createTime": old.get("created_at"),
+                "name": old.get("name") or detail[0] or f"Flow {media_type} ({media_id[:6]})",
+                "source": "batch_listing_with_local_metadata",
+            })
+
+        return result[:limit] if limit is not None and limit > 0 else result
+
+    async def fetch_user_history(self, limit: int = 100, history_type: str = "FLOW") -> list[dict]:
+        result = []
+        for project in await self.search_user_projects():
+            remaining = max(1, limit - len(result))
+            result.extend(await self.fetch_project_media(project["projectId"], limit=remaining))
+            if len(result) >= limit:
+                break
+        return result[:limit]
+
     async def generate_images(self, prompt: str, project_id: str,
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                                user_paygate_tier: str = "PAYGATE_TIER_TWO",
                                character_media_ids: list[str] = None,
-                               image_model: str = None) -> dict:
+                               image_model: str = None,
+                               count: int = 1,
+                               seed: int | None = None,
+                               base_media_id: str | None = None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -1114,52 +986,147 @@ class FlowClient:
         old REST one so the parsers downstream do not have to care which
         transport produced it.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_generate_images(
-                prompt, project_id, aspect_ratio, user_paygate_tier, character_media_ids)
 
         try:
+            if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 4:
+                raise ValueError("image count must be an integer from 1 to 4")
             pid = self._batch_project_id(project_id)
-            freq = fb.image_request(
-                prompt, pid, count=1, aspect=aspect_ratio,
-                model=self._batch_image_model(image_model),
-                ref_media_ids=list(character_media_ids or []) or None,
-            )
-            payload = await self._batch_payload(fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE)
+            model = self._batch_image_model(image_model)
+            refs = list(character_media_ids or []) or None
+
+            async def submit_once(index: int, launch_offset: float = 0.0):
+                if launch_offset:
+                    await asyncio.sleep(launch_offset)
+                request_seed = seed + index * 9973 if seed is not None else None
+                freq = fb.image_request(
+                    prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
+                    model=model, ref_media_ids=refs, base_media_id=base_media_id,
+                )
+                payload = await self._batch_payload(
+                    fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE
+                )
+                generated = fb.read_images(payload)
+                if not generated:
+                    raise fb.FlowBatchError("Image generation returned no media url")
+                return generated[0]
+
+            async def run_wave(indices: list[int]) -> dict[int, object]:
+                # Flow's UI starts variants as separate single-image RPCs with a
+                # short cadence instead of a burst. Apply the cadence relative
+                # to each wave, while Google still performs the generation work
+                # concurrently after each request has been accepted.
+                tasks = [
+                    submit_once(index, IMAGE_UI_SUBMIT_OFFSETS_S[position])
+                    for position, index in enumerate(indices)
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                return dict(zip(indices, results))
+
+            results = await run_wave(list(range(count)))
+            retry_indices = [
+                index for index, result in results.items()
+                if isinstance(result, fb.RpcError)
+                and result.rpcid == fb.RPC_GEN_IMAGE
+                and result.detail == [8]
+            ]
+            if retry_indices:
+                logger.warning(
+                    "Flow image wave had transient [8] for variant(s) %s; "
+                    "retrying after %.0fs cooldown once the first wave is fully settled",
+                    ",".join(str(i + 1) for i in retry_indices),
+                    IMAGE_TRANSIENT_RETRY_DELAY_S,
+                )
+                await asyncio.sleep(IMAGE_TRANSIENT_RETRY_DELAY_S)
+                retried = await run_wave(retry_indices)
+                results.update(retried)
+
+            images_by_index = {
+                index: result
+                for index, result in results.items()
+                if not isinstance(result, BaseException)
+            }
+            failures = {
+                index: result
+                for index, result in results.items()
+                if isinstance(result, BaseException)
+            }
+            if not images_by_index:
+                first_error = failures[min(failures)] if failures else fb.FlowBatchError(
+                    "Image generation returned no media url"
+                )
+                raise first_error
+
+            images = [images_by_index[index] for index in sorted(images_by_index)]
+
         except Exception as e:
             return _batch_error(e)
 
-        images = fb.read_images(payload)
-        if not images:
-            return {"status": 502, "error": "Image generation returned no media url"}
-        return {"status": 200, "data": {"media": [_as_media_record(i) for i in images]}}
+        data = {
+            "media": [_as_media_record(i) for i in images],
+            "requested_count": count,
+            "generated_count": len(images),
+            "complete": len(images) == count,
+        }
+        if failures:
+            data["failed_variants"] = [
+                {"index": index + 1, "error": str(error)}
+                for index, error in sorted(failures.items())
+            ]
+        return {"status": 200, "data": data}
 
     async def edit_image(self, prompt: str, source_media_id: str,
                           project_id: str,
                           aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
                           user_paygate_tier: str = "PAYGATE_TIER_ONE",
-                          character_media_ids: list[str] = None) -> dict:
-        """Regenerate from an existing image plus any entity references.
+                          character_media_ids: list[str] = None,
+                          image_model: str = None,
+                          count: int = 1,
+                          seed: int | None = None) -> dict:
+        """Edit an image with the source encoded as Flow's BASE_IMAGE input.
 
-        The REST path had a dedicated base-image input type; the new payload's
-        reference slot was captured but a base-image variant of it was not, so
-        here the source rides in as the first reference. In practice that
-        conditions the result on the source rather than editing it in place —
-        good enough for continuation scenes, not identical to the old edit.
-        Capturing the real slot is the fix; see docs/CAPTURE.md.
+        Additional references remain REFERENCE inputs. Sending the source as a
+        generic reference conditions a fresh generation; BASE_IMAGE is the wire
+        shape the current Flow editor uses for an actual image edit/refine.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_edit_image(
-                prompt, source_media_id, project_id, aspect_ratio,
-                user_paygate_tier, character_media_ids)
 
-        refs = [source_media_id] + [
-            mid for mid in (character_media_ids or []) if mid != source_media_id
-        ]
+        refs = [mid for mid in (character_media_ids or []) if mid != source_media_id]
         return await self.generate_images(
-            prompt=prompt, project_id=project_id, aspect_ratio=aspect_ratio,
-            user_paygate_tier=user_paygate_tier, character_media_ids=refs,
+            prompt=prompt,
+            project_id=project_id,
+            aspect_ratio=aspect_ratio,
+            user_paygate_tier=user_paygate_tier,
+            character_media_ids=refs,
+            image_model=image_model,
+            count=count,
+            seed=seed,
+            base_media_id=source_media_id,
         )
+
+    async def upscale_image(self, media_id: str, project_id: str,
+                            resolution: str = "2K") -> dict:
+        """Return Flow's synchronous 2K/4K image upscale as base64 JPEG data."""
+        try:
+            pid = self._batch_project_id(project_id)
+            freq = fb.image_upscale_request(media_id, resolution)
+            payload = await self._batch_payload(
+                fb.RPC_UPSCALE_IMAGE,
+                freq,
+                fb.CAPTCHA_IMAGE,
+                timeout=150,
+            )
+            encoded = fb.read_upscaled_image(payload)
+        except Exception as e:
+            return _batch_error(e)
+        return {
+            "status": 200,
+            "data": {
+                "media_id": media_id,
+                "project_id": pid,
+                "resolution": str(resolution).upper(),
+                "encodedImage": encoded,
+                "contentType": "image/jpeg",
+            },
+        }
 
     async def generate_video(self, start_image_media_id: str, prompt: str,
                               project_id: str, scene_id: str,
@@ -1167,10 +1134,6 @@ class FlowClient:
                               end_image_media_id: str = None,
                               user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
         """Submit an i2v generation. Returns operations for the poller."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_generate_video(
-                start_image_media_id, prompt, project_id, scene_id,
-                aspect_ratio, end_image_media_id, user_paygate_tier)
 
         if end_image_media_id:
             if not FLOW_ALLOW_DEGRADED:
@@ -1204,10 +1167,6 @@ class FlowClient:
                                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                                               user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
         """Generate video from multiple reference images (r2v)."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_generate_video_from_references(
-                reference_media_ids, prompt, project_id, scene_id,
-                aspect_ratio, user_paygate_tier)
 
         if not FLOW_ALLOW_DEGRADED:
             return {"error": _unsupported(
@@ -1230,8 +1189,6 @@ class FlowClient:
                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                              resolution: str = "VIDEO_RESOLUTION_4K") -> dict:
         """Upscale a video."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_upscale_video(media_id, scene_id, aspect_ratio, resolution)
         return {"error": _unsupported(
             "video upscale",
             "no upsampler rpc appears in the new frontend's captures",
@@ -1254,8 +1211,6 @@ class FlowClient:
         Everything short of that is PENDING, and the caller's own poll loop
         owns the timeout.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_check_video_status(operations)
 
         out = []
         for entry in operations or []:
@@ -1368,51 +1323,17 @@ class FlowClient:
         return fb.read_media_urls(payload, media_id)
 
     async def resolve_media_url(self, media_id: str, timeout: float = 60) -> str | None:
-        """Resolve one media id to the fresh signed Flow CDN URL.
-
-        The old media resolver was removed during the batchexecute migration,
-        but cache repair, page scans, and the public debug endpoint still call
-        this compatibility method.  ``as29s`` returns both a poster and (for a
-        video) a clip URL; prefer the clip when it exists so callers that infer
-        media type from the path keep working.
-        """
+        """Resolve a media id to a fresh signed Flow CDN URL."""
         if not media_id:
             return None
-
-        if USE_BATCH_RPC:
-            urls = await asyncio.wait_for(self._batch_media_urls(media_id), timeout=timeout)
-            return urls.video or urls.image
-
-        # Preserve the pre-migration behaviour for installations that still use
-        # the legacy REST transport.  The response shape differs between the
-        # old endpoint versions, so accept all URL fields seen in practice.
-        result = await asyncio.wait_for(self._legacy_get_media(media_id), timeout=timeout)
-        data = result.get("data", result) if isinstance(result, dict) else {}
-        if not isinstance(data, dict):
-            return None
-        for key in ("fifeUrl", "servingUri", "url"):
-            value = data.get(key)
-            if isinstance(value, str) and value:
-                return value
-        for key in ("video", "image"):
-            value = data.get(key)
-            if isinstance(value, dict):
-                for url_key in ("fifeUrl", "servingUri", "url"):
-                    url = value.get(url_key)
-                    if isinstance(url, str) and url:
-                        return url
-        return None
+        urls = await asyncio.wait_for(self._batch_media_urls(media_id), timeout=timeout)
+        return urls.video or urls.image
 
     async def resolve_media_urls(self, media_ids: list[str]) -> dict[str, str]:
-        """Resolve multiple media ids and return ``{media_id: signed_url}``.
-
-        Failed or empty resolutions are omitted so one expired/deleted media
-        record does not hide successful URLs from the batch response.
-        """
+        """Resolve multiple media ids, limiting concurrent RPCs to five."""
         unique_ids = list(dict.fromkeys(mid for mid in (media_ids or []) if mid))
         if not unique_ids:
             return {}
-
         semaphore = asyncio.Semaphore(5)
 
         async def resolve_one(media_id: str):
@@ -1420,15 +1341,14 @@ class FlowClient:
                 return await self.resolve_media_url(media_id, timeout=60)
 
         resolved = await asyncio.gather(
-            *(resolve_one(mid) for mid in unique_ids),
+            *(resolve_one(media_id) for media_id in unique_ids),
             return_exceptions=True,
         )
         output: dict[str, str] = {}
         for media_id, value in zip(unique_ids, resolved):
             if isinstance(value, Exception):
                 logger.warning("Media %s resolve failed: %s", media_id[:12], value)
-                continue
-            if isinstance(value, str) and value:
+            elif isinstance(value, str) and value:
                 output[media_id] = value
         return output
 
@@ -1440,8 +1360,6 @@ class FlowClient:
         fixed — so on the batch path this answers with the configured default
         rather than pretending to know.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_get_credits()
         return {"status": 200, "data": {
             "userPaygateTier": DEFAULT_PAYGATE_TIER,
             "note": "batchexecute path: tier is configured (DEFAULT_PAYGATE_TIER), not fetched",
@@ -1455,8 +1373,6 @@ class FlowClient:
 
     async def get_media(self, media_id: str) -> dict:
         """Fetch a media record, which is where a fresh signed url lives."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_get_media(media_id)
         try:
             urls = await self._batch_media_urls(media_id)
         except Exception as e:
@@ -1473,8 +1389,6 @@ class FlowClient:
     async def upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
                             project_id: str = "", file_name: str = "image.jpg") -> dict:
         """Upload an image into the project so it can be used as a reference."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_upload_image(image_base64, mime_type, project_id, file_name)
         try:
             pid = self._batch_project_id(project_id)
             payload = await self._batch_payload(
@@ -1486,327 +1400,6 @@ class FlowClient:
         except Exception as e:
             return _batch_error(e)
         return {"status": 200, "data": {"media": {"name": media_id}}, "_mediaId": media_id}
-
-    # ─── Legacy REST methods (aisandbox-pa, pre-migration) ───
-
-    async def _legacy_create_project(self, project_title: str, tool_name: str = "PINHOLE") -> dict:
-        """Create a project on Google Flow via tRPC endpoint.
-
-        Returns the full response including projectId.
-        """
-        url = "https://labs.google/fx/api/trpc/project.createProject"
-        body = {"json": {"projectTitle": project_title, "toolName": tool_name}}
-
-        return await self._send("trpc_request", {
-            "url": url,
-            "method": "POST",
-            "headers": {
-                "content-type": "application/json",
-                "accept": "*/*",
-            },
-            "body": body,
-        }, timeout=30)
-
-    async def _legacy_generate_images(self, prompt: str, project_id: str,
-                               aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
-                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                               character_media_ids: list[str] = None,
-                               image_model: str = None,
-                               source_media_id: str = None) -> dict:
-        """Generate image(s).
-
-        If character_media_ids is provided, uses edit_image flow (batchGenerateImages
-        with imageInputs) — same endpoint, but includes character references.
-        Without characters, uses plain generate_images.
-
-        image_model overrides the model (e.g. GEM_PIX_2_UPSAMPLE_2K / _4K for
-        resolution upsampling). source_media_id adds the source as BASE_IMAGE input.
-
-        Response structure:
-            data.media[].name = mediaId (used for video gen)
-        """
-        ts = int(time.time() * 1000)
-        ctx = self._client_context(project_id, user_paygate_tier)
-
-        request_item = {
-            "clientContext": {**ctx, "sessionId": f";{ts}"},
-            "seed": ts % 1000000,
-            "structuredPrompt": {"parts": [{"text": prompt}]},
-            "imageAspectRatio": aspect_ratio,
-            "imageModelName": image_model or IMAGE_MODELS["NANO_BANANA_PRO"],
-        }
-
-        # Add character references if provided (edit_image flow)
-        if character_media_ids:
-            request_item["imageInputs"] = [
-                {"name": mid, "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE"}
-                for mid in character_media_ids
-            ]
-        if source_media_id:
-            request_item["imageInputs"] = [
-                {"name": source_media_id, "imageInputType": "IMAGE_INPUT_TYPE_BASE_IMAGE"},
-                *(request_item.get("imageInputs") or []),
-            ]
-
-        batch_id = f"{uuid.uuid4()}" if character_media_ids else None
-        body = {
-            "clientContext": ctx,
-            "requests": [request_item],
-        }
-        if batch_id:
-            body["mediaGenerationContext"] = {"batchId": batch_id}
-            body["useNewMedia"] = True
-
-        url = self._build_url("generate_images", project_id=project_id)
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "IMAGE_GENERATION",
-        })
-
-    async def _legacy_edit_image(self, prompt: str, source_media_id: str,
-                          project_id: str,
-                          aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
-                          user_paygate_tier: str = "PAYGATE_TIER_ONE",
-                          character_media_ids: list[str] = None) -> dict:
-        """Edit an existing image using IMAGE_INPUT_TYPE_BASE_IMAGE.
-
-        If character_media_ids is provided, appends them as IMAGE_INPUT_TYPE_REFERENCE
-        after the base image. Order: [base_image, char_A, char_B, ...].
-        This helps Google Flow detect characters for consistent edits.
-        """
-        ts = int(time.time() * 1000)
-        ctx = self._client_context(project_id, user_paygate_tier)
-
-        image_inputs = [
-            {"name": source_media_id, "imageInputType": "IMAGE_INPUT_TYPE_BASE_IMAGE"}
-        ]
-        if character_media_ids:
-            for mid in character_media_ids:
-                image_inputs.append({"name": mid, "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE"})
-
-        request_item = {
-            "clientContext": {**ctx, "sessionId": f";{ts}"},
-            "seed": ts % 1000000,
-            "structuredPrompt": {"parts": [{"text": prompt}]},
-            "imageAspectRatio": aspect_ratio,
-            "imageModelName": IMAGE_MODELS["NANO_BANANA_PRO"],
-            "imageInputs": image_inputs,
-        }
-
-        body = {
-            "clientContext": ctx,
-            "mediaGenerationContext": {"batchId": f"{uuid.uuid4()}"},
-            "useNewMedia": True,
-            "requests": [request_item],
-        }
-
-        url = self._build_url("generate_images", project_id=project_id)
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "IMAGE_GENERATION",
-        })
-
-    async def _legacy_generate_video(self, start_image_media_id: str, prompt: str,
-                              project_id: str, scene_id: str,
-                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                              end_image_media_id: str = None,
-                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
-        """Generate video from start image (i2v).
-
-        Two sub-types:
-        - frame_2_video (i2v): startImage only
-        - start_end_frame_2_video (i2v_fl): startImage + endImage (for scene chaining)
-        """
-        gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
-        model_key = VIDEO_MODELS.get(user_paygate_tier, {}).get(gen_type, {}).get(aspect_ratio)
-
-        if not model_key:
-            return {"error": f"No model for tier={user_paygate_tier} type={gen_type} ratio={aspect_ratio}"}
-
-        request = {
-            "aspectRatio": aspect_ratio,
-            "seed": int(time.time()) % 10000,
-            "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
-            "videoModelKey": model_key,
-            "startImage": {"mediaId": start_image_media_id},
-            "metadata": {"sceneId": scene_id},
-        }
-
-        if end_image_media_id:
-            request["endImage"] = {"mediaId": end_image_media_id}
-
-        endpoint_key = "generate_video_start_end" if end_image_media_id else "generate_video"
-        body = {
-            "mediaGenerationContext": {"batchId": f"{uuid.uuid4()}"},
-            "clientContext": self._client_context(project_id, user_paygate_tier),
-            "requests": [request],
-            "useV2ModelConfig": True,
-        }
-
-        url = self._build_url(endpoint_key)
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "VIDEO_GENERATION",
-        }, timeout=60)  # Submit only — polling is separate
-
-    async def _legacy_generate_video_from_references(self, reference_media_ids: list[str],
-                                              prompt: str, project_id: str, scene_id: str,
-                                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
-        """Generate video from multiple reference images (r2v).
-
-        Uses referenceImages instead of startImage — the model composes
-        a video from all provided reference character images.
-
-        Args:
-            reference_media_ids: List of character media_ids (from uploadImage)
-        """
-        gen_type = "reference_frame_2_video"
-        model_key = VIDEO_MODELS.get(user_paygate_tier, {}).get(gen_type, {}).get(aspect_ratio)
-
-        if not model_key:
-            return {"error": f"No model for tier={user_paygate_tier} type={gen_type} ratio={aspect_ratio}"}
-
-        request = {
-            "aspectRatio": aspect_ratio,
-            "seed": int(time.time()) % 10000,
-            "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
-            "videoModelKey": model_key,
-            "referenceImages": [
-                {"mediaId": mid, "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"}
-                for mid in reference_media_ids
-            ],
-            "metadata": {},
-        }
-
-        body = {
-            "mediaGenerationContext": {"batchId": f"{uuid.uuid4()}"},
-            "clientContext": self._client_context(project_id, user_paygate_tier),
-            "requests": [request],
-            "useV2ModelConfig": True,
-        }
-
-        url = self._build_url("generate_video_references")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "VIDEO_GENERATION",
-        }, timeout=60)
-
-    async def _legacy_upscale_video(self, media_id: str, scene_id: str,
-                             aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                             resolution: str = "VIDEO_RESOLUTION_4K") -> dict:
-        """Upscale a video."""
-        model_key = UPSCALE_MODELS.get(resolution, "veo_3_1_upsampler_4k")
-
-        body = {
-            "clientContext": {
-                "sessionId": f";{int(time.time() * 1000)}",
-                "recaptchaContext": {
-                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-                    "token": "",
-                },
-            },
-            "requests": [{
-                "aspectRatio": aspect_ratio,
-                "resolution": resolution,
-                "seed": int(time.time()) % 100000,
-                "metadata": {"sceneId": scene_id},
-                "videoInput": {"mediaId": media_id},
-                "videoModelKey": model_key,
-            }],
-        }
-
-        url = self._build_url("upscale_video")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "VIDEO_GENERATION",
-        }, timeout=60)
-
-    async def _legacy_check_video_status(self, operations: list[dict]) -> dict:
-        """Check status of video generation operations."""
-        body = {"operations": operations}
-        url = self._build_url("check_video_status")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-        }, timeout=30)  # No captcha needed
-
-    async def _legacy_get_credits(self) -> dict:
-        """Get user credits and tier."""
-        url = self._build_url("get_credits")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "GET",
-            "headers": random_headers(),
-        }, timeout=15)
-
-    async def _legacy_get_media(self, media_id: str) -> dict:
-        """Fetch media metadata from Google Flow.
-
-        Returns the raw API response which contains a fresh signed URL
-        in data.fifeUrl or data.servingUri.
-        """
-        url = f"{GOOGLE_FLOW_API}/v1/media/{media_id}?key={GOOGLE_API_KEY}&clientContext.tool=PINHOLE"
-        return await self._send("api_request", {
-            "url": url,
-            "method": "GET",
-            "headers": random_headers(),
-        }, timeout=15)
-
-    async def _legacy_upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
-                            project_id: str = "", file_name: str = "image.jpg") -> dict:
-        """Upload an image for use as start/end frame.
-
-        Uses /v1/flow/uploadImage endpoint.
-        Response: {media: {name: "uuid", ...}, workflow: {...}}
-        We store media.name as the mediaId for video generation.
-        """
-        body = {
-            "clientContext": {
-                "projectId": project_id,
-                "tool": "PINHOLE",
-            },
-            "fileName": file_name,
-            "imageBytes": image_base64,
-            "isHidden": False,
-            "isUserUploaded": True,
-            "mimeType": mime_type,
-        }
-
-        url = self._build_url("upload_image")
-        result = await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-        }, timeout=60)
-
-        # Extract media.name for convenience (used as mediaId in video gen)
-        if not _is_ws_error(result):
-            data = result.get("data", {})
-            if isinstance(data, dict):
-                media = data.get("media", {})
-                if isinstance(media, dict) and media.get("name"):
-                    result["_mediaId"] = media["name"]
-
-        return result
 
 # ─── Response shaping ────────────────────────────────────────
 #

@@ -2,15 +2,16 @@
 import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
+from agent.config import FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
 from agent.services.flow_client import get_flow_client
 from agent.services.omni_flash import (
     check_omni_flash_status,
     generate_omni_flash_first_frame_video,
     generate_omni_flash_first_last_video,
+    generate_omni_flash_text_video,
     generate_omni_flash_video,
 )
 
@@ -22,8 +23,11 @@ class GenerateImageRequest(BaseModel):
     project_id: str
     aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    image_model: Optional[str] = None
+    count: int = Field(default=1, ge=1, le=4)
+    seed: Optional[int] = Field(default=None, ge=1, le=1_000_000_000)
+    reference_media_ids: Optional[list[str]] = None
     character_media_ids: Optional[list[str]] = None
-    image_model: Optional[str] = None  # override model, e.g. GEM_PIX_2_UPSAMPLE_2K/_4K
     source_media_id: Optional[str] = None  # upscale/edit source image
 
 
@@ -38,6 +42,7 @@ class GenerateVideoRequest(BaseModel):
     # Backward compatible: legacy requests remain Veo unless explicitly set.
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
+    resolution: Literal["360p", "720p"] = "720p"
 
 
 class GenerateVideoRefsRequest(BaseModel):
@@ -51,10 +56,21 @@ class GenerateVideoRefsRequest(BaseModel):
     # explicitly opt into Omni Flash.
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
+    resolution: Literal["360p", "720p"] = "720p"
 
 
 class GenerateOmniFlashVideoRequest(BaseModel):
     reference_media_ids: list[str]
+    prompt: str
+    project_id: str
+    scene_id: str = ""
+    duration_s: int = 8
+    resolution: Literal["360p", "720p"] = "720p"
+    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
+    user_paygate_tier: str = "PAYGATE_TIER_ONE"
+
+
+class GenerateOmniFlashTextVideoRequest(BaseModel):
     prompt: str
     project_id: str
     scene_id: str = ""
@@ -98,19 +114,34 @@ class EditImageRequest(BaseModel):
     project_id: str
     aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    image_model: Optional[str] = None
+    count: int = Field(default=1, ge=1, le=4)
+    seed: Optional[int] = Field(default=None, ge=1, le=1_000_000_000)
+    reference_media_ids: Optional[list[str]] = None
+
+
+class UpscaleImageRequest(BaseModel):
+    media_id: str
+    project_id: str = ""
+    quality: Literal["2k", "4k"] = "2k"
+    # Legacy callers use the explicit Flow enum and expect JSON metadata.
+    target_resolution: Optional[str] = None
+    user_paygate_tier: str = "PAYGATE_TIER_TWO"
 
 
 @router.get("/status")
 async def extension_status():
-    """Extension health, and which transport it is being asked to speak.
+    """Extension health.
 
-    `flow_key_present` is a legacy-path signal: the batchexecute path has no
-    bearer token at all, so false is expected there rather than a fault.
+    `flow_key_present: false` is expected, not a fault: batchexecute
+    authenticates in the page and there is no bearer token to capture.
     """
     client = get_flow_client()
     return {
         "connected": client.connected,
-        "transport": "batch" if USE_BATCH_RPC else "legacy_rest",
+        # One transport now. The key stays so the documented pre-flight check
+        # (CLAUDE.md) keeps reading {"transport": "batch", ...}.
+        "transport": "batch",
         "flow_project_id": FLOW_PROJECT_ID or None,
         "allow_degraded": FLOW_ALLOW_DEGRADED,
         "flow_key_present": client._flow_key is not None,
@@ -214,11 +245,22 @@ async def get_credits():
 
 @router.post("/generate-image")
 async def generate_image(body: GenerateImageRequest):
-    """Generate image directly (bypasses queue)."""
+    """Generate 1-4 images with an explicit Flow image model."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    result = await client.generate_images(**body.model_dump(exclude_none=True))
+    data = body.model_dump(exclude={"reference_media_ids"})
+    refs = list(dict.fromkeys((body.reference_media_ids or []) + (body.character_media_ids or [])))
+    data["character_media_ids"] = refs or None
+    source_media_id = data.pop("source_media_id", None)
+    if source_media_id:
+        result = await client.edit_image(
+            data.pop("prompt"), source_media_id, data.pop("project_id"),
+            character_media_ids=refs or None,
+            **data,
+        )
+    else:
+        result = await client.generate_images(**data)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
     return result.get("data", result)
@@ -233,8 +275,8 @@ async def generate_video(body: GenerateVideoRequest):
     request uses Omni First frame. When ``end_image_media_id`` is also present,
     it uses Omni First+Last frames.
 
-    Omni responses include ``flowkitPolling.workflows`` and must use workflow
-    media polling rather than legacy operation polling.
+    On the migrated batch transport, Omni frame-conditioned responses return
+    ``flowkitPolling.mode=batch_operation`` and are polled through ``/check-status``.
     """
     client = get_flow_client()
     if not client.connected:
@@ -248,6 +290,7 @@ async def generate_video(body: GenerateVideoRequest):
                 project_id=body.project_id,
                 scene_id=body.scene_id,
                 duration_s=body.duration_s,
+                resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
             )
@@ -262,7 +305,7 @@ async def generate_video(body: GenerateVideoRequest):
             raise HTTPException(400, str(exc)) from exc
     else:
         result = await client.generate_video(
-            **body.model_dump(exclude={"model_family", "duration_s"}, exclude_none=True)
+            **body.model_dump(exclude={"model_family", "duration_s", "resolution"}, exclude_none=True)
         )
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
@@ -276,8 +319,8 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 
     Existing requests default to ``model_family=veo``. Set
     ``model_family=omni_flash`` and ``duration_s`` to 4/6/8/10 to use Omni.
-    Omni responses include ``flowkitPolling.workflows``; poll those workflows,
-    not the operation-looking handles in the raw Flow response.
+    Migrated Omni Ingredients/R2V returns ``flowkitPolling.mode=batch_operation``;
+    poll its operations through ``/check-status``.
     """
     client = get_flow_client()
     if not client.connected:
@@ -291,6 +334,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
                 project_id=body.project_id,
                 scene_id=body.scene_id,
                 duration_s=body.duration_s,
+                resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
             )
@@ -298,11 +342,34 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
             raise HTTPException(400, str(exc)) from exc
     else:
         result = await client.generate_video_from_references(
-            **body.model_dump(exclude={"model_family", "duration_s"})
+            **body.model_dump(exclude={"model_family", "duration_s", "resolution"})
         )
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+    return result.get("data", result)
+
+
+@router.post("/generate-video-omni-text")
+async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
+    """Submit Omni 1.1 Flash text-to-video on flow.google.com.
+
+    Durations 4/6/8/10 seconds map to Flow's ``abra_t2v_<N>s`` models.
+    """
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    try:
+        result = await generate_omni_flash_text_video(**body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if result.get("error") or (
+        isinstance(result.get("status"), int) and result["status"] >= 400
+    ):
+        raise HTTPException(
+            result.get("status", 502),
+            result.get("error", result.get("data")),
+        )
     return result.get("data", result)
 
 
@@ -401,47 +468,26 @@ async def refresh_project_urls(project_id: str):
     return result
 
 
-@router.get("/media/{media_id}")
-async def get_media(media_id: str):
-    """Get media metadata + fresh signed URL from Google Flow.
-
-    Returns the raw response which may contain ``video.encodedVideo`` for
-    workflow-backed video generations.
-    """
-    client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
-    result = await client.get_media(media_id)
-    if result.get("error"):
-        raise HTTPException(502, result["error"])
-    status = result.get("status", 200)
-    if isinstance(status, int) and status >= 400:
-        raise HTTPException(status, result.get("data", "Media not found"))
-    return result.get("data", result)
-
-
 @router.post("/edit-image")
 async def edit_image(body: EditImageRequest):
-    """Edit an existing image using IMAGE_INPUT_TYPE_BASE_IMAGE (bypasses queue)."""
+    """Edit an existing image using the current Flow BASE_IMAGE wire input."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
     result = await client.edit_image(
-        body.prompt, body.source_media_id, body.project_id,
+        body.prompt,
+        body.source_media_id,
+        body.project_id,
         aspect_ratio=body.aspect_ratio,
         user_paygate_tier=body.user_paygate_tier,
+        character_media_ids=body.reference_media_ids,
+        image_model=body.image_model,
+        count=body.count,
+        seed=body.seed,
     )
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
     return result.get("data", result)
-
-
-class UpscaleImageRequest(BaseModel):
-    media_id: str
-    project_id: str = ""
-    target_resolution: str = "UPSAMPLE_IMAGE_RESOLUTION_4K"  # ..._2K / ..._4K
-    user_paygate_tier: str = "PAYGATE_TIER_TWO"
-
 
 @router.post("/upscale-image")
 async def upscale_image(body: UpscaleImageRequest):
@@ -455,17 +501,19 @@ async def upscale_image(body: UpscaleImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    resolution = body.target_resolution or body.quality.upper()
     result = await client.upscale_image(
         body.media_id, body.project_id,
-        target_resolution=body.target_resolution,
-        user_paygate_tier=body.user_paygate_tier,
+        resolution=resolution,
     )
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
     data = result.get("data", result) or {}
 
     media = data.get("media") if isinstance(data, dict) else None
-    media_id = (media or {}).get("name", "")
+    media_id = data.get("media_id", "") if isinstance(data, dict) else ""
+    if isinstance(media, dict):
+        media_id = media.get("name", "") or media_id
     encoded = data.get("encodedImage", "") if isinstance(data, dict) else ""
     if not encoded:
         raise HTTPException(502, "upsampleImage response missing encodedImage")
@@ -478,8 +526,40 @@ async def upscale_image(body: UpscaleImageRequest):
         "media_id": media_id,
         "base64": encoded,
         "size_bytes": len(raw),
-        "resolution": body.target_resolution,
+        "resolution": resolution,
     }
+
+
+@router.post("/export-image")
+async def export_image(body: UpscaleImageRequest):
+    """Download a generated Flow image at 2K or 4K as image bytes."""
+    import base64
+    import binascii
+
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    quality = body.quality.lower()
+    result = await client.upscale_image(
+        body.media_id,
+        body.project_id,
+        resolution=body.target_resolution or quality.upper(),
+    )
+    if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
+        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+    data = result.get("data", result) or {}
+    try:
+        content = base64.b64decode(data["encodedImage"], validate=True)
+    except (KeyError, TypeError, binascii.Error) as exc:
+        raise HTTPException(502, "Flow image upscale returned invalid image data") from exc
+    return Response(
+        content=content,
+        media_type=data.get("contentType", "image/jpeg"),
+        headers={
+            "Content-Disposition": f'attachment; filename="flow-{body.media_id}-{quality}.jpg"',
+            "X-Flow-Image-Quality": quality,
+        },
+    )
 
 
 @router.post("/test-resolve-media")
@@ -658,4 +738,23 @@ async def proxy_media_image(media_id: Optional[str] = None, url: Optional[str] =
             return FileResponse(str(cached_p), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
     raise HTTPException(404, "Media not found or unable to fetch")
+
+
+@router.get("/media/{media_id}")
+async def get_media(media_id: str):
+    """Get media metadata + fresh signed URL from Google Flow.
+
+    This dynamic route is declared after static ``/media/proxy`` and download
+    routes so those paths cannot be captured as a media id.
+    """
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.get_media(media_id)
+    if result.get("error"):
+        raise HTTPException(502, result["error"])
+    status = result.get("status", 200)
+    if isinstance(status, int) and status >= 400:
+        raise HTTPException(status, result.get("data", "Media not found"))
+    return result.get("data", result)
 

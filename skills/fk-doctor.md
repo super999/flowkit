@@ -6,11 +6,12 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 - Any `/api/requests/*` response has `status=FAILED` or `error_message` is set
 - A request has been `PROCESSING` for > 10 minutes with no progress
 - `GET /health` returns `extension_connected: false`
-- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_KEY`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
+- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `NO_INJECTION_RESULT`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
 - User asks "why did X fail", "what's wrong with the pipeline", "why is this stuck", "tại sao X lỗi", "lỗi gì vậy"
 - An HTTP 4xx/5xx reaches the main agent from any endpoint under `127.0.0.1:8100`
 - A YouTube upload returns `HttpError` from `googleapiclient`
 - `cryptography` / architecture / import errors surface during setup
+- A `/fk-review-video` run fails or returns nothing, or an error mentions `No such filter`, `Frame extraction failed`, `auto-denied`, `out of credits`, `CLI failed`, `CLI timed out`, `invalid model selection`
 
 **DO NOT use when:**
 - The request is still `PENDING` and hasn't been attempted yet
@@ -67,25 +68,23 @@ Cross-reference `error_message` against the taxonomy below. Print: **Diagnosis /
 
 Match against taxonomy — even partial matches (`"not found"`, `"captcha"`, `"quota"`).
 
-## Which transport is running
+## The transport
 
-Since Flow moved to `flow.google.com` (September 2026) there are two paths, and
-the taxonomy below splits on which one is live:
+One path since Flow moved to `flow.google.com` (September 2026):
 
 ```bash
-python3 -c "from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID; \
-  print('batch' if USE_BATCH_RPC else 'legacy REST', '| project:', FLOW_PROJECT_ID or 'UNPINNED')"
+python3 -c "from agent.config import FLOW_PROJECT_ID; \
+  print('batch | project:', FLOW_PROJECT_ID or 'UNPINNED')"
 ```
 
-- **batch** (default) — the agent builds an `f.req` envelope, the extension runs
-  it inside a signed-in `flow.google.com` tab. No bearer token exists on this
-  path, so `flow_key_present: false` in `/api/flow/status` is **normal**, not a
-  fault. Requires a Flow tab open and `FLOW_PROJECT_ID` pinned.
-- **legacy REST** (`USE_BATCH_RPC=0`) — the pre-migration `aisandbox-pa` path.
-  It needs a `Bearer ya29.…` Flow no longer mints, so it will 401 on any fresh
-  profile. Treat any report of it "suddenly breaking" as the migration, not a
-  regression: if `token_age_s` only climbs across tab reloads, the token is not
-  stale, it is gone.
+The agent builds an `f.req` envelope and the extension runs it inside a
+signed-in `flow.google.com` tab. **No bearer token exists on this path**, so
+`flow_key_present: false` in `/api/flow/status` is normal, not a fault.
+Requires a Flow tab open and `FLOW_PROJECT_ID` pinned.
+
+The `aisandbox-pa` REST path that preceded it has been removed — it needed a
+`Bearer ya29.…` Flow no longer mints. If an old report mentions it, that is the
+migration, not a regression.
 
 ## Error Taxonomy
 
@@ -99,20 +98,20 @@ python3 -c "from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID; \
 | `Requested entity was not found` | Uploaded `media_id` expired (~1h TTL on uploads) | `_recover_entity_not_found` re-uploads from `image_url`, re-queues PENDING | If auto-recovery fails: manually `POST /api/upload-image`, patch `media_id` |
 | `Internal error encountered` | Flow backend transient 500 | Exponential backoff: `2^retry * 10s`, capped 300s | None — wait, or retry manually after a minute |
 | `reCAPTCHA failed` / (contains `captcha`) | Extension couldn't solve reCAPTCHA | Retry ≤10× without consuming `retry_count` (processor.py:454-464) | Ensure a Google Flow tab is open and focused; reload extension |
-| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually triggered by rapid bursts of submits (e.g. many GENERATE_VIDEO in <1 minute), shared/VPN IP, or stale auth cookies | NOT auto-handled — Google blocks even fresh requests until the trust signal recovers | (1) **Stop the worker / pipeline** so submits pause. (2) Open Chrome → `chrome://settings/cookies` (or the extension's Chrome profile) → search `google.com` and `labs.google` → **remove all cookies for both**. (3) Reload `https://labs.google/fx/tools/flow` and sign back in (re-solve any reCAPTCHA puzzles manually). (4) Slow down submission cadence (≥1s gap between submits, ≤5 concurrent). If still blocked, switch to a different network or wait 1–6 h |
+| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually triggered by rapid bursts of submits (e.g. many GENERATE_VIDEO in <1 minute), shared/VPN IP, or stale auth cookies | NOT auto-handled — Google blocks even fresh requests until the trust signal recovers | (1) **Stop the worker / pipeline** so submits pause. (2) Open Chrome → `chrome://settings/cookies` (or the extension's Chrome profile) → search `google.com` and `labs.google` → **remove all cookies for both**. (3) Reload `https://flow.google.com` and sign back in (re-solve any reCAPTCHA puzzles manually). (4) Slow down submission cadence (≥1s gap between submits, ≤5 concurrent). If still blocked, switch to a different network or wait 1–6 h |
 
 ### B. HTTP status codes
 
 | Status | Origin | When you see it |
 |--------|--------|-----------------|
 | **400** | Flow API | Invalid payload / UNSAFE / entity-not-found — **route by `details.reason`** |
-| **401** | Flow API (legacy path only) | Bearer expired — and on a post-migration profile it is not expired, it was never minted. Switch to the batch path |
+| **401** | Flow API | Should not happen — batchexecute authenticates in the page, not with a bearer. Check the Flow tab is signed in; see `NO_AT_TOKEN` |
 | **403** | Extension (`background.js:432`) | `CAPTCHA_FAILED`, `NO_FLOW_TAB`, or `MODEL_ACCESS_DENIED` — read the suffix |
 | **404** | Flow API | `media_id` not found — same handler as "entity not found" |
 | **429** | Flow API | Rate-limit or quota — backoff; if message mentions QUOTA_REACHED, terminal |
 | **500** | Flow backend **or** extension fetch exception (`background.js:504`) | Transient — retry with backoff |
 | **502** | FastAPI (`agent/api/flow.py:80,92`) | Extension returned error without explicit status — treat as transient |
-| **503** | FastAPI | "Extension not connected" or `NO_FLOW_KEY` — worker re-queues PENDING, waits |
+| **503** | FastAPI | "Extension not connected" — worker re-queues PENDING, waits |
 | **504** | Agent | 60s WS timeout waiting for extension — transient, re-queue |
 
 Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as an error if ANY of these hold:
@@ -127,7 +126,6 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `Extension not connected` | WS dropped or extension offline | Reload extension at `chrome://extensions`; worker auto-retries |
 | `extension reconnected` / `extension disconnected` | WS bounce mid-request | Auto re-queue, `retry_count` NOT incremented |
 | `extension_switched` | User switched active Flow tab | Auto re-queue |
-| `NO_FLOW_KEY` | No bearer token captured — **legacy path only**; expected and harmless on the batch path | Only meaningful with `USE_BATCH_RPC=0`; otherwise ignore |
 | `NO_FLOW_TAB` | No Flow tab for CAPTCHA solve or RPC signing | Open `https://flow.google.com/` and sign in |
 | `Failed to fetch` | Network drop inside service worker | Auto-retry with backoff |
 | WS 60s timeout | Extension hung | Reload extension; worker re-queues |
@@ -139,9 +137,9 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `NO_AT_TOKEN` | The Flow tab loaded but `WIZ_global_data.SNlM0e` is absent — the page is signed out, on an interstitial, or still booting | Retried with backoff | Open `https://flow.google.com/`, confirm you are signed in, let the app finish loading |
 | `NO_FLOW_TAB` | No Flow tab to sign the request | Extension opens one and retries once | Leave one signed-in Flow tab open; nothing here works headless |
 | `FLOW_TAB_DISCARDED` | Chrome discarded the backgrounded tab and the reload did not revive it | Retried with backoff | Pin the Flow tab, or keep its window visible |
+| `NO_INJECTION_RESULT` | `chrome.scripting.executeScript` resolved with no frame result (`background.js:540`), so the envelope never ran — the Flow tab went away or was still booting at the moment of the call. Most likely on the first captcha-bearing RPC after an agent restart | Retried with backoff, counts against `MAX_RETRIES` | Usually transient — retry first. Rule out the lookalikes before digging: a failed mint reports `CAPTCHA_FAILED`, an oversized payload is not it (`MAX_RPC_TEXT` is 32 MB), and a structured-clone failure surfaces as 500, not 502. If it repeats, pin the Flow tab and reload the extension |
 | `NO_FLOW_PROJECT` | No Flow project to scope the RPC to | **Terminal — not retried** | Create a project in the Flow UI, pin its uuid as `FLOW_PROJECT_ID` (or pass `flow_project_id` on `POST /api/projects`) |
-| `UNSUPPORTED_ON_BATCH_API` | A capability whose payload was never captured off the new UI: **video upscale**, **r2v**, **start+end-frame chaining** | **Terminal — not retried** | For chaining and r2v, `FLOW_ALLOW_DEGRADED=1` falls back to plain i2v off the start frame. Upscale has no fallback. Real fix: capture the payload — `docs/CAPTURE.md` |
-| `UNSUPPORTED_ON_BATCH_API: Omni Flash` | Omni speaks the pre-migration REST + tRPC endpoints; no batchexecute payload captured | **Terminal — not retried** | Use `model_family=veo`, or `USE_BATCH_RPC=0` on a profile that still holds a bearer |
+| `UNSUPPORTED_ON_BATCH_API` | A capability whose payload was never captured off the new UI, all on the Veo path: **video upscale**, **Veo r2v**, **Veo start+end-frame chaining**. Every Omni mode is ported, so this never names Omni any more | **Terminal — not retried** | For chaining and r2v, `FLOW_ALLOW_DEGRADED=1` falls back to plain i2v off the start frame. Upscale has no fallback. Real fix: capture the payload — `docs/CAPTURE.md` |
 | `PUBLIC_ERROR_UNUSUAL_ACTIVITY` | A reCAPTCHA token was replayed — they are single-use | Retried as a captcha error | Usually self-clears; if it persists the extension is reusing a token, reload it |
 | `no ogiZ0b envelope in response` | The RPC answered but not with the payload we came for — usually a signed-out page returning an HTML redirect | Retried with backoff | Re-sign in on the Flow tab |
 | `Polling timeout after Ns: Media not found.` | The job never produced media inside the budget | Terminal after `MAX_RETRIES` | The quoted complaint is a **diagnostic, not the cause** — finished jobs report it too. Check the Flow UI: if the clip is there, raise `VIDEO_POLL_TIMEOUT` |
@@ -191,10 +189,10 @@ When the user describes a symptom in plain language, map it here first.
 | Problem | Solution |
 |---------|----------|
 | Extension shows "Agent disconnected" | Start `python -m agent.main` |
-| Extension shows "No token" | Expected on the batch path — there is no bearer any more. Only act on it with `USE_BATCH_RPC=0` |
+| Extension shows "No token" | Expected — there is no bearer any more. Not a fault |
 | `CAPTCHA_FAILED: NO_FLOW_TAB` | Open `https://flow.google.com/` — and check the extension is v0.3.0+, older builds only matched the dead labs.google URL and could not see the tab that was right there |
 | 403 `MODEL_ACCESS_DENIED` | Tier mismatch — `GET /api/flow/credits`, downgrade model in `models.json` via `/fk-change-model` |
-| 403 `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Google flagged the session as bot-like (rapid bursts, VPN/shared IP, stale cookies). **Pause submits**, then in Chrome: `chrome://settings/cookies` → remove cookies for `google.com` and `labs.google` → reload `labs.google/fx/tools/flow` → sign in & solve any captcha → resubmit with ≥1s gap and ≤5 concurrent. Switch network or wait 1–6 h if still blocked |
+| 403 `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Google flagged the session as bot-like (rapid bursts, VPN/shared IP, stale cookies). **Pause submits**, then in Chrome: `chrome://settings/cookies` → remove cookies for `google.com` and `labs.google` → reload `flow.google.com` → sign in & solve any captcha → resubmit with ≥1s gap and ≤5 concurrent. Switch network or wait 1–6 h if still blocked |
 | Scene images inconsistent across scenes | Check all refs have UUID `media_id` — run `/fk-fix-uuids` |
 | `media_id` starts with `CAMS...` | Run `/fk-fix-uuids` to extract UUID from URL |
 | Upscale fails on every scene | On the batch path upscale is unported (`UNSUPPORTED_ON_BATCH_API`) — no upsampler rpc has been captured. On the legacy path it needs `PAYGATE_TIER_TWO` |
@@ -204,6 +202,25 @@ When the user describes a symptom in plain language, map it here first.
 | YouTube upload `invalidTags` | Tag-char overflow — quote overhead counts (spaces → +2 per tag) |
 | Python `cryptography` arch mismatch | Use `python3.10`, not `python3.13` (x86/arm64 binary mismatch) |
 | `curl: (7) Failed to connect to 127.0.0.1:8100` | Agent not running — `python -m agent.main` |
+
+### G. Video review errors (`services/video_reviewer.py`)
+
+Review runs outside the worker — no retry policy applies, the call just raises.
+Providers, models and efforts come from `agent/providers.json`; see
+`/fk-change-provider`.
+
+| Error | Cause | Fix |
+|---|---|---|
+| `Frame extraction failed: ... No such filter: 'drawtext'` | ffmpeg built without libfreetype. Should no longer happen — the filter is probed and skipped — so seeing it means the probe was bypassed | `ffmpeg -filters \| grep drawtext`. Absent is fine; sheets just lose their burned-in timestamps |
+| `agy CLI had tools auto-denied headlessly (RunCommand) — its N-character answer cannot be trusted to have come from the images` | agy tried to shell out to read the contact sheet instead of using its file-reading tool; headless mode cannot prompt, so the tool was denied. Raised whether or not agy still produced an answer — the prompt carries the rubric, both scene prompts and the character names, which is enough to write a plausible review without ever looking at a frame | Restore the steering in `_AGY_READ_STEER`. **Do not** add `--dangerously-skip-permissions` — it auto-approves every tool including arbitrary shell commands, for a job that only reads JPEGs |
+| `agy CLI returned non-JSON output: ...` | agy answered with bare prose on a zero exit code — usually a permission or startup error | Read the quoted text; it names the real problem |
+| `agy CLI failed (rc=1): invalid model selection ... conflicts with --effort=` | agy's slugs name their own effort (`gemini-3.8-flash-low`), so model and effort cannot both be set | Clear one of them. The API rejects the pair with a 400; this only reaches the CLI from a hand-edited `providers.json` |
+| `codex CLI failed (rc=1): ... Your workspace is out of credits` | The OpenAI workspace has no balance. `installed: true` only means the binary is on PATH | Refill, or switch the role to `claude`/`agy` |
+| `codex CLI exited cleanly but wrote no answer to its output file` | codex returned success but produced nothing | Re-run; if it repeats, switch provider |
+| `<provider> CLI timed out after Ns` | The review exceeded `REVIEW_CLI_TIMEOUT_S` (default 120) | Raise the env var, or lower `REVIEW_FPS_*` / `REVIEW_MAX_FRAMES` so there is less to look at |
+| `review answer had an error entry with no usable severity (expected one of ['CRITICAL', 'HIGH', 'MINOR']): ...` | The model graded an error with something outside the three severities. `has_critical_errors`, the `character_consistency` cap and the fix guide all branch on that exact string, so anything else silently disables all three — the model flagged a defect and the score would not show it | Read the quoted entry. A model that keeps doing this is not following the rubric; switch the role to another one |
+| `Scene <id>: review answer needed repair — N error field(s) defaulted, M usable segment(s) unreadable` (warning, not a failure) | A near-miss field name (`timeRange` for `time_range`) or a missing description. Repaired, because losing those costs context but cannot move a score | Nothing required. A rising count means the model is drifting from the rubric |
+| `CLI answer had no dimensions: ...` | The CLI returned parseable JSON with no scores in it. Every dimension defaults to 5.0, so this would otherwise have become a complete, plausible "poor" review of a video nobody actually looked at | Read the quoted answer. Usually the model wrote prose around the JSON, or ran out of context — lower `REVIEW_MAX_FRAMES` or try another model |
 
 ## Worker retry policy (`processor.py:_handle_failure`)
 
@@ -224,7 +241,6 @@ Always end with a prescription block:
 Symptom:     <what the user observed>
 Root cause:  <what actually went wrong>
 Layer:       Flow | Extension | FastAPI | Worker | YouTube | Env
-Transport:   batch (flow.google.com) | legacy REST (aisandbox-pa)
 Auto-handler: <which branch of _handle_failure fires, or "none — terminal">
 
 === FIX ===
