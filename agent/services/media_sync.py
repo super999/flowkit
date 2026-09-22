@@ -15,7 +15,7 @@ from typing import Optional, List, Dict, Any
 from agent.config import MEDIA_CACHE_DIR
 from agent.db import crud
 from agent.services.flow_client import get_flow_client
-from agent.services.media_cache import get_cached_image_path, download_to_file
+from agent.services.media_cache import get_cached_image_path, download_to_file, is_valid_media_file
 
 logger = logging.getLogger("flowkit.media_sync")
 
@@ -24,6 +24,63 @@ _sync_task: Optional[asyncio.Task] = None
 _caching_task: Optional[asyncio.Task] = None
 _is_syncing = False
 _is_caching = False
+
+# ``Zzl0ze`` can take more than a minute for a large Flow project.  The old
+# 25-second guard cancelled that request while the extension was still
+# working, which made a healthy sync look like an empty project.  Keep a
+# guard so a broken project cannot block all other projects forever, but leave
+# enough room for the batchexecute request and its media URL lookups.
+PROJECT_SYNC_TIMEOUT_SECONDS = 180.0
+# ``None`` asks FlowClient for the complete project listing.  The old 150/200
+# item cap silently dropped newer media from large projects.
+PROJECT_MEDIA_LIMIT: Optional[int] = None
+
+
+def _text_value(value: Any) -> str:
+    """Return a stripped display value, ignoring non-string/empty values."""
+    if value is None:
+        return ""
+    value = str(value).strip()
+    return value
+
+
+def _project_id(project: Dict[str, Any]) -> str:
+    """Read a project id from the shapes used by old and batch Flow clients."""
+    if not isinstance(project, dict):
+        return ""
+    for key in ("projectId", "project_id", "id"):
+        value = _text_value(project.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _project_title(project: Dict[str, Any], fallback: str = "") -> str:
+    """Read a human project title without treating a UUID as its name.
+
+    The legacy project response nested the title under ``projectInfo`` while
+    the batch/local-link response puts it in top-level ``title``.  A UUID is
+    useful as an id, but storing it as ``project_title`` causes the dashboard
+    to display the first eight characters instead of the real title.
+    """
+    if isinstance(project, dict):
+        info = project.get("projectInfo")
+        info = info if isinstance(info, dict) else {}
+        pid = _project_id(project)
+        for source in (info, project):
+            for key in (
+                "projectTitle",
+                "title",
+                "project_title",
+                "projectName",
+                "name",
+                "displayName",
+            ):
+                value = _text_value(source.get(key))
+                if value and value != pid:
+                    return value
+
+    return _text_value(fallback)
 
 
 async def cache_media_item(
@@ -46,13 +103,13 @@ async def cache_media_item(
     dest_path = MEDIA_CACHE_DIR / f"{media_id}.{ext}"
     local_rel = f"/output/_cache/{media_id}.{ext}"
 
-    if not force and dest_path.exists() and dest_path.stat().st_size > 0:
+    if not force and is_valid_media_file(dest_path):
         await crud.update_media_library_item(media_id, local_path=local_rel, is_cached=1)
         return local_rel
 
     # 1. Try provided URL if available
     downloaded = False
-    if url and url.startswith("http") and not url.startswith("http://127.0.0.1") and not url.startswith("http://localhost"):
+    if url and url.startswith("http") and "/asb/" not in url and not url.startswith("http://127.0.0.1") and not url.startswith("http://localhost"):
         downloaded = await download_to_file(url, dest_path)
 
     # 2. If URL failed (e.g. 403 expired) or missing, resolve fresh signed URL from Flow
@@ -60,7 +117,7 @@ async def cache_media_item(
         client = get_flow_client()
         if client and client.connected:
             try:
-                fresh_url = await client.resolve_media_url(media_id, timeout=15)
+                fresh_url = await client.resolve_media_url(media_id, timeout=60)
                 if fresh_url:
                     downloaded = await download_to_file(fresh_url, dest_path)
                     if downloaded:
@@ -69,7 +126,7 @@ async def cache_media_item(
             except Exception as e:
                 logger.debug("Failed to resolve fresh URL for %s: %s", media_id, e)
 
-    if downloaded and dest_path.exists() and dest_path.stat().st_size > 0:
+    if downloaded and is_valid_media_file(dest_path):
         await crud.update_media_library_item(media_id, local_path=local_rel, is_cached=1)
         logger.info("Successfully persisted media %s (%s) to local cache", media_id, ext)
         return local_rel
@@ -101,30 +158,60 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
     _is_syncing = True
     total_synced = 0
     projects_synced = 0
+    failed_projects: List[Dict[str, str]] = []
 
     try:
         projects_to_sync: List[Dict[str, Any]] = []
 
         if project_id:
             project = await crud.get_project(project_id)
-            title = (project.get("name") or project.get("title") or "") if project else ""
+            title = _project_title(project) if project else ""
             if not title:
                 try:
                     all_projs = await client.search_user_projects(limit=100)
-                    p_match = next((p for p in all_projs if p.get("projectId") == project_id), None)
-                    title = p_match.get("projectInfo", {}).get("projectTitle", "") if p_match else ""
-                except Exception:
-                    pass
+                    p_match = next(
+                        (p for p in all_projs if _project_id(p) == project_id),
+                        None,
+                    )
+                    title = _project_title(p_match) if p_match else ""
+                except Exception as e:
+                    logger.warning("Failed to resolve title for Flow project %s: %s", project_id[:8], e)
             projects_to_sync.append({"projectId": project_id, "title": title})
         else:
-            all_projs = await client.search_user_projects(limit=100)
+            try:
+                all_projs = await client.search_user_projects(limit=100)
+            except Exception as e:
+                message = f"无法获取 Flow 项目列表: {e}"
+                logger.exception("Flow project discovery failed")
+                return {
+                    "status": "error",
+                    "synced": 0,
+                    "projects_synced": 0,
+                    "projects_failed": 0,
+                    "errors": [message],
+                    "message": message,
+                }
             for p in all_projs:
-                pid = p.get("projectId")
+                pid = _project_id(p)
                 if pid:
-                    title = p.get("projectInfo", {}).get("projectTitle", "")
+                    title = _project_title(p)
                     projects_to_sync.append({"projectId": pid, "title": title})
 
         logger.info("Syncing media for %d Flow projects in parallel...", len(projects_to_sync))
+
+        # Pre-load existing media metadata as a fallback.  The Flow listing can
+        # omit prompt/model/url fields for older or newly-created media; those
+        # empty values must not erase useful local metadata on upsert.
+        existing_media: Dict[str, Dict[str, Any]] = {}
+        try:
+            existing_rows, _ = await crud.list_media_library(limit=10000)
+            existing_media = {
+                row["media_id"]: row
+                for row in existing_rows
+                if isinstance(row, dict) and row.get("media_id")
+            }
+        except Exception as e:
+            logger.debug("Failed to pre-load existing media metadata: %s", e)
 
         # Pre-load all local user prompts from refgen_result, character & scene
         local_user_prompts = {}
@@ -147,57 +234,78 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
 
         sem = asyncio.Semaphore(4)
 
-        async def _sync_single_project(p_info: Dict[str, Any]) -> tuple[int, bool]:
+        async def _sync_single_project(p_info: Dict[str, Any]) -> tuple[int, bool, Optional[str]]:
             pid = p_info["projectId"]
-            p_title = p_info["title"]
+            p_title = _text_value(p_info.get("title")) or None
             async with sem:
                 try:
-                    # 25s timeout per project to allow reliable tRPC response without false timeouts
+                    # Large project listings can take 55s+ over the extension
+                    # bridge.  Keep this guard well above that observed case.
                     media_items = await asyncio.wait_for(
-                        client.fetch_project_media(pid, limit=150),
-                        timeout=25.0
+                        client.fetch_project_media(pid, limit=PROJECT_MEDIA_LIMIT),
+                        timeout=PROJECT_SYNC_TIMEOUT_SECONDS,
                     )
                     if not media_items:
-                        return 0, False
+                        return 0, True, None
 
                     batch_items = []
                     for item in media_items:
+                        if not isinstance(item, dict):
+                            continue
                         mid = item.get("mediaKey") or item.get("media_id")
                         if not mid:
                             continue
 
-                        raw_mtype = item.get("mediaType") or "IMAGE"
-                        media_type = "VIDEO" if raw_mtype.upper() == "VIDEO" else "IMAGE"
+                        existing = existing_media.get(mid, {})
+                        raw_mtype = item.get("mediaType") or item.get("media_type") or existing.get("media_type") or "IMAGE"
+                        media_type = "VIDEO" if _text_value(raw_mtype).upper() == "VIDEO" else "IMAGE"
                         ext = "mp4" if media_type == "VIDEO" else "jpg"
 
                         # Check if already cached locally
                         cached_p = MEDIA_CACHE_DIR / f"{mid}.{ext}"
-                        is_cached = 1 if (cached_p.exists() and cached_p.stat().st_size > 0) else 0
+                        is_cached = 1 if is_valid_media_file(cached_p) else 0
                         local_path = f"/output/_cache/{mid}.{ext}" if is_cached else None
 
-                        flow_orig_prompt = item.get("prompt") or ""
-                        flow_trans_prompt = item.get("translated_prompt") or None
+                        flow_orig_prompt = _clean_flow_prompt(
+                            _text_value(item.get("prompt") or item.get("original_prompt"))
+                        )
+                        flow_trans_prompt = _clean_flow_prompt(
+                            _text_value(item.get("translated_prompt") or item.get("translatedPrompt"))
+                        ) or None
                         user_orig_prompt = local_user_prompts.get(mid)
+                        existing_prompt = _clean_flow_prompt(_text_value(existing.get("prompt")))
 
                         # prompt: original user prompt (or Flow Chinese/original prompt)
                         # translated_prompt: underlying translated english prompt if different
                         if user_orig_prompt:
-                            prompt_text = user_orig_prompt
-                            translated_prompt_text = flow_trans_prompt or (_clean_flow_prompt(flow_orig_prompt) if flow_orig_prompt != user_orig_prompt else None)
+                            prompt_text = _text_value(user_orig_prompt)
+                            translated_prompt_text = (
+                                flow_trans_prompt
+                                if flow_trans_prompt and flow_trans_prompt != prompt_text
+                                else (flow_orig_prompt if flow_orig_prompt != prompt_text else None)
+                            )
                         else:
-                            prompt_text = flow_orig_prompt or _clean_flow_prompt(flow_trans_prompt or "")
-                            translated_prompt_text = flow_trans_prompt if flow_trans_prompt != prompt_text else None
+                            prompt_text = flow_orig_prompt or existing_prompt or flow_trans_prompt or ""
+                            translated_prompt_text = (
+                                flow_trans_prompt
+                                if flow_trans_prompt and flow_trans_prompt != prompt_text
+                                else None
+                            )
 
-                        model = item.get("modelName") or ""
-                        aspect = item.get("aspectRatio") or ""
-                        thumb = item.get("url") or ""
+                        model = _text_value(item.get("modelName") or item.get("model_name") or existing.get("model_name")) or None
+                        aspect = _text_value(item.get("aspectRatio") or item.get("aspect_ratio") or existing.get("aspect_ratio")) or None
+                        thumb = _text_value(item.get("url") or item.get("thumb") or existing.get("url") or existing.get("thumb")) or None
+                        item_title = _text_value(item.get("title") or item.get("name"))
+                        project_title = p_title or _text_value(existing.get("project_title")) or None
+                        prompt_value = prompt_text or None
+                        name = (prompt_text[:50] if prompt_text else item_title or existing.get("name")) or None
 
                         batch_items.append({
                             "media_id": mid,
                             "project_id": pid,
-                            "project_title": p_title,
-                            "name": prompt_text[:50] if prompt_text else f"Flow {media_type} ({mid[:6]})",
-                            "prompt": prompt_text,
+                            "project_title": project_title,
+                            "name": name,
+                            "prompt": prompt_value,
                             "translated_prompt": translated_prompt_text,
                             "model_name": model,
                             "aspect_ratio": aspect,
@@ -207,37 +315,61 @@ async def sync_flow_media(project_id: Optional[str] = None, auto_cache: bool = T
                             "local_path": local_path,
                             "is_cached": is_cached,
                             "source": "refgen" if mid in local_user_prompts else "flow",
-                            "created_at": item.get("createTime") or None,
+                            "created_at": item.get("createTime") or item.get("created_at") or existing.get("created_at") or None,
                         })
 
                     if batch_items:
                         upserted = await crud.batch_upsert_media_library(batch_items)
-                        logger.info("Synced %d media items from project '%s' (%s)", upserted, p_title, pid[:8])
-                        return upserted, True
+                        logger.info("Synced %d media items from project '%s' (%s)", upserted, p_title or pid[:8], pid[:8])
+                        return upserted, True, None
 
-                    return 0, True
+                    return 0, True, None
                 except asyncio.TimeoutError:
-                    logger.debug("Project %s sync timed out after 8s", pid[:8])
-                    return 0, False
+                    error = f"项目 {pid[:8]} 同步超时（>{PROJECT_SYNC_TIMEOUT_SECONDS:.0f}s）"
+                    logger.warning(error)
+                    return 0, False, error
                 except Exception as e:
-                    logger.warning("Failed to sync media for project %s: %s", pid[:8], e)
-                    return 0, False
+                    error = f"项目 {pid[:8]} 同步失败: {e}"
+                    logger.warning(error, exc_info=True)
+                    return 0, False, error
 
         sync_results = await asyncio.gather(*[_sync_single_project(p) for p in projects_to_sync])
-        for upserted, success in sync_results:
+        for p_info, (upserted, success, error) in zip(projects_to_sync, sync_results):
             total_synced += upserted
             if success:
                 projects_synced += 1
+            else:
+                failed_projects.append({
+                    "project_id": p_info["projectId"],
+                    "project_title": p_info.get("title") or p_info["projectId"],
+                    "error": error or "未知错误",
+                })
 
         # Trigger auto-caching in the background if requested
-        if auto_cache:
+        if auto_cache and total_synced:
             trigger_background_cache_all()
 
+        if failed_projects and projects_synced:
+            status = "partial"
+            message = (
+                f"部分同步完成：已同步 {total_synced} 条媒体（来自 {projects_synced} 个项目），"
+                f"{len(failed_projects)} 个项目失败"
+            )
+        elif failed_projects:
+            status = "error"
+            message = f"同步失败：{len(failed_projects)} 个项目未完成；{failed_projects[0]['error']}"
+        else:
+            status = "success"
+            message = f"成功增量同步 {total_synced} 条媒体（来自 {projects_synced} 个项目）"
+
         return {
-            "status": "success",
+            "status": status,
             "synced": total_synced,
             "projects_synced": projects_synced,
-            "message": f"成功增量同步 {total_synced} 条媒体（来自 {projects_synced} 个项目）",
+            "projects_failed": len(failed_projects),
+            "errors": [item["error"] for item in failed_projects],
+            "failed_projects": failed_projects,
+            "message": message,
         }
 
     finally:
@@ -252,8 +384,18 @@ async def cache_all_uncached(project_id: Optional[str] = None, max_concurrency: 
 
     _is_caching = True
     try:
-        # Fetch uncached media items from database
-        rows, total = await crud.list_media_library(project_id=project_id, is_cached=0, limit=500)
+        # Earlier versions cached HTTP-200 login pages as images. Recheck the
+        # actual files so the cache button repairs these false positives too.
+        all_rows, _ = await crud.list_media_library(project_id=project_id, limit=10000)
+        rows = []
+        for item in all_rows:
+            if item.get("is_cached"):
+                ext = "mp4" if (item.get("media_type") or "").upper() == "VIDEO" else "jpg"
+                cached_path = MEDIA_CACHE_DIR / f"{item['media_id']}.{ext}"
+                if is_valid_media_file(cached_path):
+                    continue
+                await crud.update_media_library_item(item["media_id"], is_cached=0, local_path=None)
+            rows.append(item)
         if not rows:
             return {"status": "success", "cached": 0, "total": 0, "message": "所有图片均已在本地持久化缓存"}
 
@@ -281,7 +423,7 @@ async def cache_all_uncached(project_id: Optional[str] = None, max_concurrency: 
 
         logger.info("Batch caching completed: %d success, %d failed", success_count, fail_count)
         return {
-            "status": "success",
+            "status": "partial" if fail_count and success_count else "error" if fail_count else "success",
             "cached": success_count,
             "failed": fail_count,
             "total": len(rows),
@@ -355,6 +497,7 @@ async def repair_flow_prompts(project_id: Optional[str] = None) -> Dict[str, Any
     repaired_count = 0
     restored_local = 0
     cleaned_count = 0
+    failed_projects: List[Dict[str, str]] = []
 
     # 1. Restore local user prompts from refgen_result & scene first
     local_prompts = {}
@@ -386,25 +529,42 @@ async def repair_flow_prompts(project_id: Optional[str] = None) -> Dict[str, Any
     else:
         try:
             projs = await client.search_user_projects(limit=100)
-            projects_to_check = [p.get("projectId") for p in projs if p.get("projectId")]
+            projects_to_check = [_project_id(p) for p in projs if _project_id(p)]
         except Exception as e:
-            logger.warning("Failed to search user projects for prompt repair: %s", e)
+            error = f"无法获取 Flow 项目列表: {e}"
+            logger.warning("Prompt repair project discovery failed: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "repaired": 0,
+                "restored_local": restored_local,
+                "cleaned": cleaned_count,
+                "projects_failed": 0,
+                "errors": [error],
+                "message": error,
+            }
 
     # 3. For each project, fetch project media and extract prompts
     for pid in projects_to_check:
         try:
-            media_items = await client.fetch_project_media(pid, limit=200)
+            media_items = await asyncio.wait_for(
+                client.fetch_project_media(pid, limit=PROJECT_MEDIA_LIMIT),
+                timeout=PROJECT_SYNC_TIMEOUT_SECONDS,
+            )
             if not media_items:
                 continue
 
             async with crud._db_lock:
                 for item in media_items:
+                    if not isinstance(item, dict):
+                        continue
                     mid = item.get("mediaKey") or item.get("media_id")
                     if not mid:
                         continue
 
-                    orig_p = item.get("prompt") or ""
-                    trans_p = item.get("translated_prompt") or None
+                    orig_p = _clean_flow_prompt(_text_value(item.get("prompt") or item.get("original_prompt")))
+                    trans_p = _clean_flow_prompt(
+                        _text_value(item.get("translated_prompt") or item.get("translatedPrompt"))
+                    ) or None
 
                     if mid in local_prompts:
                         orig_p = local_prompts[mid]
@@ -432,8 +592,14 @@ async def repair_flow_prompts(project_id: Optional[str] = None) -> Dict[str, Any
                         repaired_count += 1
 
                 await db.commit()
+        except asyncio.TimeoutError:
+            error = f"项目 {pid[:8]} 提示词修复超时（>{PROJECT_SYNC_TIMEOUT_SECONDS:.0f}s）"
+            failed_projects.append({"project_id": pid, "error": error})
+            logger.warning(error)
         except Exception as e:
-            logger.warning("Failed to repair prompts for project %s: %s", pid, e)
+            error = f"项目 {pid[:8]} 提示词修复失败: {e}"
+            failed_projects.append({"project_id": pid, "error": error})
+            logger.warning(error, exc_info=True)
 
     # 4. Clean any residual translation preambles
     async with crud._db_lock:
@@ -447,10 +613,26 @@ async def repair_flow_prompts(project_id: Optional[str] = None) -> Dict[str, Any
             cleaned_count += 1
         await db.commit()
 
+    if failed_projects and (repaired_count or restored_local or cleaned_count):
+        status = "partial"
+        message = (
+            f"部分修复完成：修复 {repaired_count} 条云端原版提示词，恢复 {restored_local} 条本地提示词，"
+            f"清理 {cleaned_count} 条格式异常词；{len(failed_projects)} 个项目失败。"
+        )
+    elif failed_projects:
+        status = "error"
+        message = f"提示词修复失败：{failed_projects[0]['error']}"
+    else:
+        status = "success"
+        message = f"成功修复 {repaired_count} 条云端原版提示词，恢复 {restored_local} 条本地提示词，清理 {cleaned_count} 条格式异常词。"
+
     return {
-        "status": "success",
+        "status": status,
         "repaired": repaired_count,
         "restored_local": restored_local,
         "cleaned": cleaned_count,
-        "message": f"成功修复 {repaired_count} 条云端原版提示词，恢复 {restored_local} 条本地提示词，清理 {cleaned_count} 条格式异常词。"
+        "projects_failed": len(failed_projects),
+        "errors": [item["error"] for item in failed_projects],
+        "failed_projects": failed_projects,
+        "message": message,
     }

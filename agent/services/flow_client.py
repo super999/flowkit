@@ -19,9 +19,9 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from agent.config import (
     GOOGLE_FLOW_API, GOOGLE_API_KEY, ENDPOINTS,
@@ -77,6 +77,14 @@ def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Op
         - original_prompt: user's original input (e.g. Chinese) or primary prompt
         - translated_prompt: translated English prompt if different, else None
     """
+    # The September 2026 batchexecute response is positional rather than the
+    # old REST-shaped object.  A generated media record looks like
+    # ``[media_id, project_id, workflow_id, status, ..., meta, details]``.
+    # Keep this parser here so callers that already use the public helper get
+    # the same prompt recovery as the project-media synchronizer.
+    if isinstance(item, (list, tuple)):
+        return _extract_wire_prompt_pair(item, wf)
+
     meta = item.get("mediaMetadata", {}) or item.get("metadata", {}) if isinstance(item, dict) else {}
     req_data = meta.get("requestData", {}) if isinstance(meta, dict) else {}
     prompt_inputs = req_data.get("promptInputs", []) if isinstance(req_data, dict) else []
@@ -134,6 +142,236 @@ def extract_prompt_pair_from_media(item: dict, wf: dict = None) -> tuple[str, Op
         cleaned_model = clean_flow_prompt_text(model_prompt)
         return cleaned_model, None
     return "", None
+
+
+def _extract_wire_prompt_pair(item: list | tuple, wf: Any = None) -> tuple[str, Optional[str]]:
+    """Read original/translated prompts from a positional Flow media record.
+
+    Current Flow stores the user's text in ``meta[6][2]`` and the translated
+    model prompt in ``details[0][7]``.  These indexes are intentionally kept
+    in one small function because the surrounding record is a positional
+    protobuf-like array and is easy to mistake for the older listing shape.
+    """
+    meta = item[5] if len(item) > 5 else None
+    details = item[6] if len(item) > 6 else None
+    video_details = item[7] if len(item) > 7 else None
+    if not isinstance(details, list) and isinstance(video_details, list):
+        details = video_details
+    original = ""
+    translated = ""
+
+    if isinstance(meta, list) and len(meta) > 6:
+        # Video records keep the complete user prompt in meta[1].  Image
+        # records use the structured prompt block below instead.
+        if isinstance(video_details, list) and len(meta) > 1 and isinstance(meta[1], str):
+            original = meta[1].strip()
+        prompt_meta = meta[6]
+        prompt_inputs = prompt_meta[2] if isinstance(prompt_meta, list) and len(prompt_meta) > 2 else None
+        if isinstance(prompt_inputs, list):
+            for prompt_input in prompt_inputs:
+                if isinstance(prompt_input, list) and prompt_input:
+                    candidate = prompt_input[0]
+                    if not isinstance(candidate, str) and len(prompt_input) > 2:
+                        candidate = _first_wire_text(prompt_input[2])
+                elif isinstance(prompt_input, dict):
+                    candidate = (
+                        prompt_input.get("textInput")
+                        or prompt_input.get("prompt")
+                        or prompt_input.get("text")
+                    )
+                else:
+                    candidate = None
+                if isinstance(candidate, str) and candidate.strip():
+                    if not original:
+                        original = candidate.strip()
+                    break
+
+    if isinstance(details, list) and details:
+        first_detail = details[0]
+        if isinstance(first_detail, list) and len(first_detail) > 7:
+            candidate = first_detail[7]
+            if isinstance(candidate, str):
+                translated = candidate.strip()
+
+    # Upload records have no prompt block.  Do not use the workflow display
+    # title as a prompt: it is only a generated filename/title and would make
+    # the media detail panel show misleading prompt text.
+    if not original and isinstance(wf, dict):
+        original = (
+            str(wf.get("userPrompt") or "").strip()
+            or str((wf.get("metadata") or {}).get("displayName") or "").strip()
+        )
+
+    cleaned_orig = clean_flow_prompt_text(original)
+    cleaned_trans = clean_flow_prompt_text(translated)
+    if cleaned_orig and cleaned_trans and cleaned_orig != cleaned_trans:
+        return cleaned_orig, cleaned_trans
+    if cleaned_orig:
+        return cleaned_orig, None
+    if cleaned_trans:
+        return cleaned_trans, None
+    return "", None
+
+
+def _first_wire_text(value: Any) -> str:
+    """Return the first non-empty text leaf from nested Flow prompt slots."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list):
+        for child in value:
+            text = _first_wire_text(child)
+            if text:
+                return text
+    if isinstance(value, dict):
+        for child in value.values():
+            text = _first_wire_text(child)
+            if text:
+                return text
+    return ""
+
+
+def _is_flow_uuid(value: Any) -> bool:
+    """Return whether *value* is a canonical Flow media/workflow UUID."""
+    # FlowClient is defined below this helper; lookup happens when called after
+    # module import has completed.
+    return isinstance(value, str) and FlowClient._UUID_RE.match(value) is not None
+
+
+def _wire_timestamp(value: Any) -> Optional[str]:
+    """Convert Flow's ``[unix_seconds, nanos]`` timestamp to ISO UTC text."""
+    if isinstance(value, (list, tuple)) and value:
+        value = value[0]
+    if not isinstance(value, (int, float)):
+        return value if isinstance(value, str) and value else None
+    seconds = float(value)
+    # Be tolerant of the millisecond form seen in a few older records.
+    if seconds > 10_000_000_000:
+        seconds /= 1000
+    try:
+        return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _wire_workflow_index(payload: Any) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Index workflow titles by workflow id and by their linked media id."""
+    by_workflow: dict[str, dict] = {}
+    by_media: dict[str, dict] = {}
+    workflows = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
+    if not isinstance(workflows, list):
+        return by_workflow, by_media
+
+    for workflow in workflows:
+        if not isinstance(workflow, (list, tuple)):
+            continue
+        workflow_id = workflow[0] if workflow and isinstance(workflow[0], str) else ""
+        block = workflow[3] if len(workflow) > 3 else None
+        title = block[0].strip() if isinstance(block, list) and block and isinstance(block[0], str) else ""
+        media_id = block[4] if isinstance(block, list) and len(block) > 4 and _is_flow_uuid(block[4]) else ""
+        info = {"title": title, "workflow": workflow}
+        if workflow_id:
+            by_workflow[workflow_id] = info
+        if media_id:
+            by_media[media_id] = info
+    return by_workflow, by_media
+
+
+def _wire_media_entries(payload: Any):
+    """Yield current positional media records from a project-media payload."""
+    direct = payload[2] if isinstance(payload, list) and len(payload) > 2 else None
+    if isinstance(direct, list):
+        for entry in direct:
+            if (
+                isinstance(entry, (list, tuple))
+                and len(entry) > 6
+                and _is_flow_uuid(entry[0])
+                and (
+                    isinstance(entry[5], (list, dict))
+                    or isinstance(entry[6], (list, dict))
+                    or (len(entry) > 7 and isinstance(entry[7], (list, dict)))
+                )
+            ):
+                yield entry
+
+
+def _wire_urls(entry: list | tuple) -> tuple[str, str]:
+    """Return the best embedded video/image URL from a media record."""
+    urls: list[str] = []
+
+    def add(value: Any):
+        if isinstance(value, str) and value.startswith("https://") and value not in urls:
+            urls.append(value)
+
+    # The media record carries its own URL in these slots.  Restrict the first
+    # pass to them so a reference image URL nested in prompt metadata cannot be
+    # mistaken for this record's poster.
+    meta = entry[5] if len(entry) > 5 else None
+    if isinstance(meta, list):
+        for index in (5, 10):
+            if len(meta) > index:
+                add(meta[index])
+
+    details = entry[6] if len(entry) > 6 else None
+    if isinstance(details, list):
+        # User uploads put the original image at details[1][3].
+        upload_detail = details[1] if len(details) > 1 else None
+        if isinstance(upload_detail, list) and len(upload_detail) > 3:
+            add(upload_detail[3])
+        # Generated video/image URLs may be nested under the details block.
+        for text in fb._walk_strings(details):
+            add(text)
+
+    video_details = entry[7] if len(entry) > 7 else None
+    if isinstance(video_details, list):
+        for text in fb._walk_strings(video_details):
+            add(text)
+
+    video = next((url for url in urls if "/video/" in url), "")
+    image = next((url for url in urls if "/image/" in url), "")
+    if not image:
+        # Upload records use lh3 rather than Flow's /image/<uuid> CDN path.
+        image = next((url for url in urls if "googleusercontent.com" in url), "")
+    return video, image
+
+
+def _wire_is_video(entry: list | tuple) -> bool:
+    """Video records carry a dedicated details block at positional slot 7."""
+    video_details = entry[7] if len(entry) > 7 else None
+    return (
+        isinstance(video_details, list)
+        and bool(video_details)
+        and isinstance(video_details[0], list)
+    )
+
+
+def _wire_aspect(details: Any, media_type: str) -> str:
+    """Map Flow's numeric aspect slot to the names used by the local schema."""
+    value = None
+    if isinstance(details, list) and details:
+        first = details[0]
+        ratio_index = 16 if media_type == "VIDEO" else 14
+        if isinstance(first, list) and len(first) > ratio_index:
+            value = first[ratio_index]
+    if not isinstance(value, int):
+        return str(value) if value is not None else ""
+    if media_type == "VIDEO":
+        return {1: "VIDEO_ASPECT_RATIO_PORTRAIT", 2: "VIDEO_ASPECT_RATIO_LANDSCAPE"}.get(value, str(value))
+    return {
+        1: "IMAGE_ASPECT_RATIO_SQUARE",
+        2: "IMAGE_ASPECT_RATIO_PORTRAIT",
+        3: "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        4: "IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE",
+        5: "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
+    }.get(value, str(value))
+
+
+def _wire_model_name(details: Any) -> str:
+    """Read a named video model without guessing numeric image model enums."""
+    if isinstance(details, list) and details:
+        first = details[0]
+        if isinstance(first, list) and len(first) > 12 and isinstance(first[12], str):
+            return first[12]
+    return ""
 
 
 class FlowClient:
@@ -754,17 +992,60 @@ class FlowClient:
         projects = await self.search_user_projects(limit=10000, tool_name=tool_name)
         return next((p for p in projects if p["projectId"] == project_id), {})
 
-    async def fetch_project_media(self, project_id: str, limit: int = 200) -> list[dict]:
-        """Read current media identities over RPC, preserving local prompt metadata.
+    async def fetch_project_media(self, project_id: str, limit: int | None = None) -> list[dict]:
+        """Read all current project media over RPC.
 
-        A generated title is not the original prompt. Never replace a cached
-        original prompt/model with guessed metadata from a positional listing.
+        Current Flow returns the complete media set in ``payload[2]``.  It is
+        ordered by UUID rather than creation time, so applying the historical
+        200-item cap silently drops arbitrary media (including newly generated
+        images).  ``limit`` remains available for API callers that explicitly
+        request a view cap; synchronization callers should pass ``None``.
+
+        A generated title is not the original prompt.  Prefer prompt data from
+        the wire record, then preserve local metadata for older records.
         """
         from agent.db import crud
         payload = await self._batch_payload(fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id))
         cached, _ = await crud.list_media_library(project_id=project_id, limit=10000)
         by_id = {r["media_id"]: r for r in cached}
+        workflows_by_id, workflows_by_media = _wire_workflow_index(payload)
         result, seen = [], set()
+
+        # New batchexecute shape: payload[2] contains one complete media record
+        # per image/video.  Parse it before falling back to the old operation
+        # listing shape below.
+        for entry in _wire_media_entries(payload):
+            mid = entry[0]
+            if mid in seen:
+                continue
+            seen.add(mid)
+            old = by_id.get(mid, {})
+            workflow_id = entry[2] if len(entry) > 2 and isinstance(entry[2], str) else ""
+            wf_info = workflows_by_id.get(workflow_id) or workflows_by_media.get(mid) or {}
+            prompt, translated_prompt = extract_prompt_pair_from_media(entry, wf_info.get("workflow"))
+            video_url, image_url = _wire_urls(entry)
+            media_type = "VIDEO" if _wire_is_video(entry) or video_url else (old.get("media_type") or "IMAGE")
+            embedded_url = video_url if media_type == "VIDEO" else (image_url or video_url)
+            fresh_url = embedded_url
+            result.append({
+                "mediaKey": mid,
+                "mediaType": media_type,
+                "prompt": prompt or old.get("prompt") or "",
+                "translated_prompt": translated_prompt or old.get("translated_prompt"),
+                "modelName": _wire_model_name(entry[7] if len(entry) > 7 else None) or old.get("model_name") or "",
+                "aspectRatio": _wire_aspect(
+                    entry[7] if _wire_is_video(entry) else (entry[6] if len(entry) > 6 else None),
+                    media_type,
+                ) or old.get("aspect_ratio") or "",
+                "url": fresh_url or old.get("url") or "",
+                "createTime": _wire_timestamp(entry[5][0] if isinstance(entry[5], list) and entry[5] else None) or old.get("created_at"),
+                "name": prompt or wf_info.get("title") or old.get("name") or f"Flow {media_type} ({mid[:6]})",
+                "source": "batch_project_media",
+            })
+
+        # Legacy listing shape: entries look like
+        # [operation_id, ..., [title, timestamp, ..., media_id]].  Keep this
+        # path for old captures and for any mixed response during migration.
         for node in fb._walk_lists(payload):
             if len(node) < 4 or not isinstance(node[0], str) or not self._UUID_RE.match(node[0]):
                 continue
@@ -786,9 +1067,11 @@ class FlowClient:
                            "prompt": old.get("prompt") or "", "translated_prompt": old.get("translated_prompt"),
                            "modelName": old.get("model_name") or "", "aspectRatio": old.get("aspect_ratio") or "",
                            "url": fresh_url or old.get("url") or "", "createTime": old.get("created_at"),
+                           "name": old.get("name") or detail[0] or f"Flow {media_type} ({mid[:6]})",
                            "source": "batch_listing_with_local_metadata"})
-            if len(result) >= limit:
-                break
+
+        if limit is not None and limit > 0:
+            return result[:limit]
         return result
 
     async def fetch_user_history(self, limit: int = 100, history_type: str = "FLOW") -> list[dict]:
@@ -1083,6 +1366,71 @@ class FlowClient:
         payload = await self._batch_payload(
             fb.RPC_MEDIA, fb.media_request(media_id), timeout=60)
         return fb.read_media_urls(payload, media_id)
+
+    async def resolve_media_url(self, media_id: str, timeout: float = 60) -> str | None:
+        """Resolve one media id to the fresh signed Flow CDN URL.
+
+        The old media resolver was removed during the batchexecute migration,
+        but cache repair, page scans, and the public debug endpoint still call
+        this compatibility method.  ``as29s`` returns both a poster and (for a
+        video) a clip URL; prefer the clip when it exists so callers that infer
+        media type from the path keep working.
+        """
+        if not media_id:
+            return None
+
+        if USE_BATCH_RPC:
+            urls = await asyncio.wait_for(self._batch_media_urls(media_id), timeout=timeout)
+            return urls.video or urls.image
+
+        # Preserve the pre-migration behaviour for installations that still use
+        # the legacy REST transport.  The response shape differs between the
+        # old endpoint versions, so accept all URL fields seen in practice.
+        result = await asyncio.wait_for(self._legacy_get_media(media_id), timeout=timeout)
+        data = result.get("data", result) if isinstance(result, dict) else {}
+        if not isinstance(data, dict):
+            return None
+        for key in ("fifeUrl", "servingUri", "url"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+        for key in ("video", "image"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                for url_key in ("fifeUrl", "servingUri", "url"):
+                    url = value.get(url_key)
+                    if isinstance(url, str) and url:
+                        return url
+        return None
+
+    async def resolve_media_urls(self, media_ids: list[str]) -> dict[str, str]:
+        """Resolve multiple media ids and return ``{media_id: signed_url}``.
+
+        Failed or empty resolutions are omitted so one expired/deleted media
+        record does not hide successful URLs from the batch response.
+        """
+        unique_ids = list(dict.fromkeys(mid for mid in (media_ids or []) if mid))
+        if not unique_ids:
+            return {}
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def resolve_one(media_id: str):
+            async with semaphore:
+                return await self.resolve_media_url(media_id, timeout=60)
+
+        resolved = await asyncio.gather(
+            *(resolve_one(mid) for mid in unique_ids),
+            return_exceptions=True,
+        )
+        output: dict[str, str] = {}
+        for media_id, value in zip(unique_ids, resolved):
+            if isinstance(value, Exception):
+                logger.warning("Media %s resolve failed: %s", media_id[:12], value)
+                continue
+            if isinstance(value, str) and value:
+                output[media_id] = value
+        return output
 
     async def get_credits(self) -> dict:
         """Get user credits and tier.

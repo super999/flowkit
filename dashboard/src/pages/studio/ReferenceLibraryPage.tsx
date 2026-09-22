@@ -30,8 +30,15 @@ interface MediaLibraryItem {
 
 interface FlowProject {
   projectId: string
+  title?: string | null
+  source?: string | null
   projectInfo?: { projectTitle?: string; thumbnailMediaKey?: string }
   creationTime?: string
+}
+
+function getFlowProjectName(project?: FlowProject | null): string {
+  const title = project?.title?.trim() || project?.projectInfo?.projectTitle?.trim()
+  return title || project?.projectId?.slice(0, 8) || '当前项目'
 }
 
 interface MediaStats {
@@ -151,14 +158,51 @@ export default function ReferenceLibraryPage() {
     const syncPid = targetProjectId !== undefined ? targetProjectId : (selectedProjectId || undefined)
     setSyncing(true)
     const currentProj = projects.find(p => p.projectId === syncPid)
-    const projName = currentProj?.projectInfo?.projectTitle || '当前项目'
-    setStatusMsg(syncPid ? `🔄 正在快速增量同步「${projName}」媒体...` : '🔄 正在并发增量同步 Flow 所有项目的媒体...')
+    const projName = getFlowProjectName(currentProj)
+    setStatusMsg(syncPid ? `🔄 正在增量同步「${projName}」媒体...` : '🔄 正在并发增量同步已关联 Flow 项目的媒体...')
     try {
-      const res = await postAPI<{ status: string; synced?: number; projects_synced?: number; message?: string }>(
+      const res = await postAPI<{
+        status?: string
+        synced?: number
+        projects_synced?: number
+        failed?: number
+        projects_failed?: number
+        failed_projects?: number
+        message?: string
+      }>(
         '/api/media-library/sync',
         { project_id: syncPid, auto_cache: true }
       )
-      setStatusMsg(`✅ ${res.message || '同步完成'}`)
+      const status = String(res.status || '').toLowerCase()
+      const message = res.message || '同步未返回详细结果'
+
+      if (status === 'error') {
+        setStatusMsg(`❌ 同步失败: ${message}`)
+        return
+      }
+      if (status === 'already_running') {
+        setStatusMsg(`⚠️ ${message}`)
+        return
+      }
+      if (status !== 'success' && status !== 'partial') {
+        setStatusMsg(`⚠️ 同步状态异常: ${message}`)
+        return
+      }
+
+      const synced = Number(res.synced || 0)
+      const failed = Number(res.failed || 0)
+      const failedProjects = Number(res.projects_failed || res.failed_projects || 0)
+      const projectsSynced = Number(res.projects_synced || 0)
+      const expectedProjects = syncPid ? 1 : projects.length
+      const partial = status === 'partial' || failed > 0 || failedProjects > 0 || (expectedProjects > 0 && projectsSynced < expectedProjects)
+      const noMedia = synced === 0 && projectsSynced === 0
+      if (partial) {
+        setStatusMsg(`⚠️ 同步部分完成: ${message}`)
+      } else if (noMedia) {
+        setStatusMsg(`⚠️ 同步完成但未发现媒体: ${message}`)
+      } else {
+        setStatusMsg(`✅ ${message}`)
+      }
       await loadMedia()
     } catch (e: any) {
       setStatusMsg(`❌ 同步失败: ${e.message || e}`)
@@ -176,7 +220,8 @@ export default function ReferenceLibraryPage() {
         '/api/media-library/cache-all',
         { project_id: selectedProjectId || undefined, max_concurrency: 5 }
       )
-      setStatusMsg(`✅ ${res.message || '批量缓存任务已完成'}`)
+      const icon = res.status === 'error' ? '❌' : res.status === 'partial' ? '⚠️' : res.status === 'already_running' ? '⏳' : '✅'
+      setStatusMsg(`${icon} ${res.message || '批量缓存任务已完成'}`)
       await loadMedia()
     } catch (e: any) {
       setStatusMsg(`❌ 批量缓存失败: ${e.message || e}`)
@@ -209,7 +254,8 @@ export default function ReferenceLibraryPage() {
         '/api/media-library/repair-prompts',
         { project_id: selectedProjectId || undefined }
       )
-      setStatusMsg(`✅ ${res.message || '历史提示词修复完成'}`)
+      const icon = res.status === 'error' ? '❌' : res.status === 'partial' ? '⚠️' : '✅'
+      setStatusMsg(`${icon} ${res.message || '历史提示词修复完成'}`)
       await loadMedia()
     } catch (e: any) {
       setStatusMsg(`❌ 修复失败: ${e.message || e}`)
@@ -362,9 +408,9 @@ export default function ReferenceLibraryPage() {
                   disabled={syncing}
                   onClick={() => handleSync(selectedProjectId)}
                   className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs gap-1 shadow"
-                  title={`仅对当前选择的项目执行高速增量同步（<1秒）`}
+                  title="仅对当前选择的项目执行增量同步"
                 >
-                  {syncing ? '⏳ 同步中...' : `🔄 快速同步当前项目 (${projects.find(p => p.projectId === selectedProjectId)?.projectInfo?.projectTitle || '选定项目'})`}
+                  {syncing ? '⏳ 同步中...' : `🔄 同步当前项目 (${getFlowProjectName(projects.find(p => p.projectId === selectedProjectId)) || '选定项目'})`}
                 </Button>
                 <Button
                   size="sm"
@@ -372,9 +418,9 @@ export default function ReferenceLibraryPage() {
                   disabled={syncing}
                   onClick={() => handleSync('')}
                   className="text-xs text-zinc-300 border-zinc-700 hover:bg-zinc-800 gap-1"
-                  title="并发同步当前 Flow 账号下的所有项目"
+                  title="并发同步当前 Flow 账号下已关联的项目"
                 >
-                  🌐 同步全部项目
+                  🌐 同步已关联项目
                 </Button>
               </>
             ) : (
@@ -383,9 +429,9 @@ export default function ReferenceLibraryPage() {
                 disabled={syncing}
                 onClick={() => handleSync('')}
                 className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs gap-1 shadow"
-                title="并发增量同步当前 Flow 账号下的所有项目"
+                title="并发增量同步当前 Flow 账号下已关联的项目"
               >
-                {syncing ? '⏳ 同步中...' : '🔄 并发增量同步 Flow 全部项目'}
+                {syncing ? '⏳ 同步中...' : '🔄 并发增量同步已关联 Flow 项目'}
               </Button>
             )}
 
@@ -482,10 +528,10 @@ export default function ReferenceLibraryPage() {
                   className="px-2 py-1.5 rounded text-xs outline-none max-w-48"
                   style={{ background: 'var(--card)', color: 'var(--text)', border: '1px solid var(--border)' }}
                 >
-                  <option value="">— 全部 Flow 项目 —</option>
+                  <option value="">— 已关联 Flow 项目 —</option>
                   {projects.map(p => (
                     <option key={p.projectId} value={p.projectId}>
-                      {p.projectInfo?.projectTitle || p.projectId.slice(0, 8)}
+                      {getFlowProjectName(p)}
                     </option>
                   ))}
                 </select>
@@ -573,7 +619,7 @@ export default function ReferenceLibraryPage() {
           {items.length === 0 ? (
             <div className="p-12 text-center text-xs border rounded-lg border-dashed flex flex-col items-center gap-2" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
               <span>本地数据库暂无符合条件的参考图。</span>
-              <span className="text-[11px]">点击右上角「🔄 增量同步 Flow 媒体」即可一键将 Flow 云端所有项目的媒体增量拉取至本地数据库！</span>
+              <span className="text-[11px]">点击右上角「🔄 增量同步 Flow 媒体」即可一键将已关联 Flow 项目的媒体增量拉取至本地数据库！</span>
             </div>
           ) : (
             <>

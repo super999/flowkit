@@ -441,35 +441,36 @@ async def upsert_media_library_item(
                 created_at, updated_at
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(media_id) DO UPDATE SET
-                project_id = COALESCE(excluded.project_id, media_library.project_id),
-                project_title = COALESCE(excluded.project_title, media_library.project_title),
+                project_id = COALESCE(NULLIF(excluded.project_id, ''), media_library.project_id),
+                project_title = COALESCE(NULLIF(excluded.project_title, ''), media_library.project_title),
                 name = CASE
                     WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND (excluded.prompt LIKE '%English translation of your image prompt%' OR excluded.name LIKE '%English translation of your image prompt%')
                     THEN media_library.name
-                    ELSE COALESCE(excluded.name, media_library.name)
+                    ELSE COALESCE(NULLIF(excluded.name, ''), media_library.name)
                 END,
                 prompt = CASE
                     WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND excluded.prompt LIKE '%English translation of your image prompt%'
                     THEN media_library.prompt
                     WHEN media_library.source IN ('refgen', 'upload', 'scene') AND excluded.source = 'flow' AND media_library.prompt IS NOT NULL AND media_library.prompt != ''
                     THEN media_library.prompt
-                    ELSE COALESCE(excluded.prompt, media_library.prompt)
+                    ELSE COALESCE(NULLIF(excluded.prompt, ''), media_library.prompt)
                 END,
-                translated_prompt = COALESCE(excluded.translated_prompt, media_library.translated_prompt),
-                model_name = COALESCE(excluded.model_name, media_library.model_name),
-                aspect_ratio = COALESCE(excluded.aspect_ratio, media_library.aspect_ratio),
+                translated_prompt = COALESCE(NULLIF(excluded.translated_prompt, ''), media_library.translated_prompt),
+                model_name = COALESCE(NULLIF(excluded.model_name, ''), media_library.model_name),
+                aspect_ratio = COALESCE(NULLIF(excluded.aspect_ratio, ''), media_library.aspect_ratio),
                 media_type = COALESCE(excluded.media_type, media_library.media_type),
-                url = COALESCE(excluded.url, media_library.url),
-                thumb = COALESCE(excluded.thumb, media_library.thumb),
-                local_path = COALESCE(excluded.local_path, media_library.local_path),
+                url = COALESCE(NULLIF(excluded.url, ''), media_library.url),
+                thumb = COALESCE(NULLIF(excluded.thumb, ''), media_library.thumb),
+                local_path = COALESCE(NULLIF(excluded.local_path, ''), media_library.local_path),
                 is_cached = MAX(excluded.is_cached, media_library.is_cached),
                 source = COALESCE(media_library.source, excluded.source),
+                created_at = CASE WHEN ? IS NOT NULL THEN excluded.created_at ELSE media_library.created_at END,
                 updated_at = excluded.updated_at
             """,
             (
                 media_id, project_id, project_title, name, prompt, translated_prompt, model_name,
                 aspect_ratio, media_type, url, thumb, local_path, is_cached, source,
-                created_at or now, now
+                created_at or now, now, created_at or None
             )
         )
         await db.commit()
@@ -494,29 +495,30 @@ async def batch_upsert_media_library(items: list[dict]) -> int:
                     created_at, updated_at
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(media_id) DO UPDATE SET
-                    project_id = COALESCE(excluded.project_id, media_library.project_id),
-                    project_title = COALESCE(excluded.project_title, media_library.project_title),
+                    project_id = COALESCE(NULLIF(excluded.project_id, ''), media_library.project_id),
+                    project_title = COALESCE(NULLIF(excluded.project_title, ''), media_library.project_title),
                     name = CASE
                         WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND (excluded.prompt LIKE '%English translation of your image prompt%' OR excluded.name LIKE '%English translation of your image prompt%')
                         THEN media_library.name
-                        ELSE COALESCE(excluded.name, media_library.name)
+                        ELSE COALESCE(NULLIF(excluded.name, ''), media_library.name)
                     END,
                     prompt = CASE
                         WHEN media_library.prompt IS NOT NULL AND media_library.prompt != '' AND media_library.prompt NOT LIKE '%English translation of your image prompt%' AND excluded.prompt LIKE '%English translation of your image prompt%'
                         THEN media_library.prompt
                         WHEN media_library.source IN ('refgen', 'upload', 'scene') AND excluded.source = 'flow' AND media_library.prompt IS NOT NULL AND media_library.prompt != ''
                         THEN media_library.prompt
-                        ELSE COALESCE(excluded.prompt, media_library.prompt)
+                        ELSE COALESCE(NULLIF(excluded.prompt, ''), media_library.prompt)
                     END,
-                    translated_prompt = COALESCE(excluded.translated_prompt, media_library.translated_prompt),
-                    model_name = COALESCE(excluded.model_name, media_library.model_name),
-                    aspect_ratio = COALESCE(excluded.aspect_ratio, media_library.aspect_ratio),
+                    translated_prompt = COALESCE(NULLIF(excluded.translated_prompt, ''), media_library.translated_prompt),
+                    model_name = COALESCE(NULLIF(excluded.model_name, ''), media_library.model_name),
+                    aspect_ratio = COALESCE(NULLIF(excluded.aspect_ratio, ''), media_library.aspect_ratio),
                     media_type = COALESCE(excluded.media_type, media_library.media_type),
-                    url = COALESCE(excluded.url, media_library.url),
-                    thumb = COALESCE(excluded.thumb, media_library.thumb),
-                    local_path = COALESCE(excluded.local_path, media_library.local_path),
+                    url = COALESCE(NULLIF(excluded.url, ''), media_library.url),
+                    thumb = COALESCE(NULLIF(excluded.thumb, ''), media_library.thumb),
+                    local_path = COALESCE(NULLIF(excluded.local_path, ''), media_library.local_path),
                     is_cached = MAX(excluded.is_cached, media_library.is_cached),
                     source = COALESCE(media_library.source, excluded.source),
+                    created_at = CASE WHEN ? IS NOT NULL THEN excluded.created_at ELSE media_library.created_at END,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -535,7 +537,8 @@ async def batch_upsert_media_library(items: list[dict]) -> int:
                     int(bool(item.get("is_cached"))),
                     item.get("source") or "flow",
                     item.get("created_at") or item.get("createTime") or now,
-                    now
+                    now,
+                    item.get("created_at") or item.get("createTime") or None
                 )
             )
             count += 1

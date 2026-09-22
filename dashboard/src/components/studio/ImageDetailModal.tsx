@@ -61,16 +61,57 @@ const MODEL_NAME_MAP: Record<string, string> = {
   IMAGEN_2: 'Imagen 2 (IMAGEN_2)',
 }
 
-export function formatAspectRatio(aspect?: string | null, mediaType?: string | null): string {
+interface MediaDimensions {
+  width: number
+  height: number
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(Math.round(a))
+  let y = Math.abs(Math.round(b))
+  while (y) {
+    const remainder = x % y
+    x = y
+    y = remainder
+  }
+  return x || 1
+}
+
+function formatMeasuredAspectRatio(dimensions: MediaDimensions, mediaType?: string | null): string {
+  const { width, height } = dimensions
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return '未知'
+
+  const ratio = width / height
   const isVideo = mediaType?.toUpperCase() === 'VIDEO'
-  if (!aspect) return isVideo ? '16:9 (横屏视频)' : '9:16 (默认竖屏)'
-  const upper = aspect.toUpperCase()
+  const measuredSuffix = isVideo ? ' (按实际视频分辨率)' : ' (按实际分辨率)'
+  const commonRatios: Array<[number, string]> = [
+    [9 / 16, '9:16 (竖屏)'],
+    [16 / 9, '16:9 (横屏)'],
+    [1, '1:1 (正方形)'],
+    [3 / 4, '3:4'],
+    [4 / 3, '4:3'],
+  ]
+  const common = commonRatios.find(([value]) => Math.abs(ratio - value) < 0.02)
+  if (common) return `${common[1]}${measuredSuffix}`
+
+  const divisor = gcd(width, height)
+  return `${Math.round(width / divisor)}:${Math.round(height / divisor)}${isVideo ? ' (实际视频分辨率)' : ' (实际分辨率)'}`
+}
+
+export function formatAspectRatio(
+  aspect?: string | null,
+  mediaType?: string | null,
+  dimensions?: MediaDimensions | null,
+): string {
+  const cleanAspect = aspect?.trim()
+  if (!cleanAspect) return dimensions ? formatMeasuredAspectRatio(dimensions, mediaType) : '未知'
+  const upper = cleanAspect.toUpperCase()
   if (upper === 'VIDEO_ASPECT_RATIO_LANDSCAPE') return '16:9 (横屏视频)'
   if (upper === 'VIDEO_ASPECT_RATIO_PORTRAIT') return '9:16 (竖屏视频)'
   if (upper === 'VIDEO_ASPECT_RATIO_SQUARE') return '1:1 (方形视频)'
   if (ASPECT_RATIO_MAP[upper]) return ASPECT_RATIO_MAP[upper]
-  if (ASPECT_RATIO_MAP[aspect]) return ASPECT_RATIO_MAP[aspect]
-  const clean = aspect.replace(/^(IMAGE|VIDEO)_ASPECT_RATIO_/, '')
+  if (ASPECT_RATIO_MAP[cleanAspect]) return ASPECT_RATIO_MAP[cleanAspect]
+  const clean = cleanAspect.replace(/^(IMAGE|VIDEO)_ASPECT_RATIO_/, '')
   return ASPECT_RATIO_MAP[clean] || clean
 }
 
@@ -83,14 +124,15 @@ export function formatModelName(model?: string | null, source?: string, mediaTyp
     return '🎬 Google Veo 3.1'
   }
 
-  const isUserUpload = source === 'upload' || source === 'user' || (!model && source !== 'project' && source !== 'library')
+  const sourceKey = source?.trim().toLowerCase()
+  const isUserUpload = sourceKey === 'upload' || sourceKey === 'user'
   if (isUserUpload) {
     return '📁 用户自主上传 (非模型生图)'
   }
 
   if (!model || !model.trim()) {
-    if (source === 'library') return '🍌 Banana Pro (本地/图库)'
-    if (source === 'project') return '🍌 Banana Pro (GEM_PIX_2)'
+    if (sourceKey === 'library') return '🍌 Banana Pro (本地/图库)'
+    if (sourceKey === 'project') return '🍌 Banana Pro (GEM_PIX_2)'
     return '— (未指定模型)'
   }
 
@@ -248,6 +290,8 @@ export default function ImageDetailModal({
   })
   const [caching, setCaching] = useState(false)
   const [cacheError, setCacheError] = useState<string | null>(null)
+  const sourceKey = info.source?.trim().toLowerCase()
+  const isUserUpload = sourceKey === 'upload' || sourceKey === 'user'
 
   // Reset prompt tab when media changes
   useEffect(() => {
@@ -559,17 +603,18 @@ export default function ImageDetailModal({
 
           {/* Prompt Section (Supports Dual Prompt Tabs) */}
           {(() => {
+            const originalPrompt = info.prompt?.trim() || ''
+            const translatedPrompt = info.translatedPrompt?.trim() || ''
             const hasDualPrompts = Boolean(
-              info.prompt &&
-              info.translatedPrompt &&
-              info.translatedPrompt.trim() !== '' &&
-              info.translatedPrompt.trim() !== info.prompt.trim()
+              originalPrompt &&
+              translatedPrompt &&
+              translatedPrompt !== originalPrompt
             )
-            const activePrompt = (promptTab === 'translated' && info.translatedPrompt)
-              ? info.translatedPrompt
-              : (info.prompt || info.title || '')
+            const activePrompt = (promptTab === 'translated' && translatedPrompt)
+              ? translatedPrompt
+              : (originalPrompt || translatedPrompt || info.title || '')
 
-            if (!activePrompt && !info.translatedPrompt && !info.prompt) return null
+            if (!activePrompt) return null
 
             return (
               <div className="flex flex-col gap-1.5">
@@ -658,11 +703,11 @@ export default function ImageDetailModal({
               {/* 生图/视频模型 / 来源 */}
               <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
                 <span className="text-[10px] text-zinc-400">
-                  {info.mediaType?.toUpperCase() === 'VIDEO' ? '视频生成模型' : (info.source === 'upload' ? '来源类型' : '生图模型')}
+                  {info.mediaType?.toUpperCase() === 'VIDEO' ? '视频生成模型' : (isUserUpload ? '来源类型' : '生图模型')}
                 </span>
                 <span
                   className={`font-semibold truncate ${
-                    info.source === 'upload'
+                    isUserUpload
                       ? 'text-amber-300'
                       : info.mediaType?.toUpperCase() === 'VIDEO'
                       ? 'text-purple-300'
@@ -677,8 +722,8 @@ export default function ImageDetailModal({
               {/* 画面比例 (Aspect Ratio) */}
               <div className="p-2 rounded bg-zinc-950/50 border border-zinc-800/60 flex flex-col">
                 <span className="text-[10px] text-zinc-400">画面比例</span>
-                <span className="font-semibold text-cyan-300 truncate" title={formatAspectRatio(info.aspect, info.mediaType)}>
-                  {formatAspectRatio(info.aspect, info.mediaType)}
+                <span className="font-semibold text-cyan-300 truncate" title={formatAspectRatio(info.aspect, info.mediaType, dimensions)}>
+                  {formatAspectRatio(info.aspect, info.mediaType, dimensions)}
                 </span>
               </div>
 
